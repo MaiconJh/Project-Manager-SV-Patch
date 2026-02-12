@@ -1,5 +1,6 @@
 
 node_modules/
+changes/
 dist/
 build/
 .env

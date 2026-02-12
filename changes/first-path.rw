@@ -1,0 +1,37 @@
+# Project Manager & SV Patch - Repo base structure (clean)
+
+# Folders (kept via .keep with newline content)
+CREATE_FILE | src/.keep
+INSERT_AFTER_REGEX | src/.keep | ^$ | 
+
+CREATE_FILE | tools/.keep
+INSERT_AFTER_REGEX | tools/.keep | ^$ | 
+
+CREATE_FILE | tools/sv_patch/.keep
+INSERT_AFTER_REGEX | tools/sv_patch/.keep | ^$ | 
+
+CREATE_FILE | data/.keep
+INSERT_AFTER_REGEX | data/.keep | ^$ | 
+
+CREATE_FILE | docs/.keep
+INSERT_AFTER_REGEX | docs/.keep | ^$ | 
+
+# README (no leading blank lines)
+CREATE_FILE | README.md
+INSERT_AFTER_REGEX | README.md | ^$ | # Project Manager & SV Patch
+INSERT_AFTER_REGEX | README.md | ^# Project Manager & SV Patch$ | 
+INSERT_AFTER_REGEX | README.md | ^$ | Desktop IDE-like tool for structured patch orchestration, project visualization, and controlled file editing using Safe-Vibe Patch pipelines.
+INSERT_AFTER_REGEX | README.md | pipelines\.$ | 
+
+# .gitignore (full set)
+CREATE_FILE | .gitignore
+INSERT_AFTER_REGEX | .gitignore | ^$ | node_modules/
+INSERT_AFTER_REGEX | .gitignore | ^node_modules/$ | dist/
+INSERT_AFTER_REGEX | .gitignore | ^dist/$ | build/
+INSERT_AFTER_REGEX | .gitignore | ^build/$ | .env
+INSERT_AFTER_REGEX | .gitignore | ^\.env$ | *.log
+INSERT_AFTER_REGEX | .gitignore | ^\*\.log$ | data/index/
+INSERT_AFTER_REGEX | .gitignore | ^data/index/$ | data/pipelines/
+INSERT_AFTER_REGEX | .gitignore | ^data/pipelines/$ | data/temp/
+INSERT_AFTER_REGEX | .gitignore | ^data/temp/$ | __pycache__/
+INSERT_AFTER_REGEX | .gitignore | ^__pycache__/$ | *.pyc

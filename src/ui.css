@@ -1,0 +1,838 @@
+/*
+PM-SV-PATCH META
+Version: pm-svpatch-ui@2026.02.11-r1
+Last-Edited: 2026-02-11
+Contains: UI shell, file tree, file view cards (view/edit/markdown/raw/fullscreen), toasts, patch controls UI.
+Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2) Refresh button alignment/feedback CSS (no logic changes).
+*/
+:root{
+  --bg:#0d1117;
+  --surface:#161b22;
+  --text:#c9d1d9;
+  --muted:#8b949e;
+  --border:#30363d;
+  --border2:#3c444d;
+  --accent:#1f6feb;
+  --danger:#f85149;
+  --success:#3fb950;
+
+  --r:10px;
+  --r2:8px;
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--text);
+  font-family:var(--font);
+  font-size:14px;
+}
+
+.app{min-height:100%; display:flex; flex-direction:column}
+
+.topbar{
+  position:sticky; top:0; z-index:20;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:12px 16px;
+  background:rgba(13,17,23,.92);
+  border-bottom:1px solid var(--border);
+  backdrop-filter: blur(10px);
+}
+
+.brandTitle{font-weight:700; letter-spacing:.2px}
+.brandSub{font-size:12px; color:var(--muted); margin-top:2px; max-width:56vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+
+.topActions{display:flex; gap:8px; align-items:center}
+
+.layout{
+  flex:1;
+  display:grid;
+  grid-template-columns: 1.2fr .8fr;
+  gap:16px;
+  padding:16px;
+}
+
+.panel{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--r);
+  overflow:hidden;
+}
+
+.panelHead{
+  padding:12px 14px;
+  display:flex;
+  align-items:baseline;
+  justify-content:space-between;
+  border-bottom:1px solid var(--border);
+}
+
+
+.panelTitleRow{
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+.headBtn{
+  padding:6px;
+}
+
+.panelTitle{font-weight:700}
+.panelMeta{color:var(--muted); font-size:12px}
+
+.panelFoot{
+  padding:10px 12px;
+  border-top:1px solid var(--border);
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+}
+
+.stats{color:var(--muted); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+
+.btn{
+  border:1px solid var(--border);
+  background:rgba(22,27,34,.6);
+  color:var(--text);
+  border-radius:8px;
+  padding:8px 12px;
+  cursor:pointer;
+  transition:.12s ease;
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+}
+
+.btn:hover{border-color:var(--border2); transform:translateY(-1px)}
+.btn:active{transform:translateY(0)}
+.btn.small{padding:6px 10px; font-size:13px}
+.btn.ghost{background:transparent}
+.btn.primary{background:var(--accent); border-color:rgba(255,255,255,.12)}
+.btn.primary:hover{filter:brightness(1.04)}
+.btn.danger{background:rgba(248,81,73,.10); border-color:rgba(248,81,73,.35)}
+.btn.danger:hover{background:rgba(248,81,73,.16)}
+.btn:disabled{opacity:.55; cursor:not-allowed; transform:none}
+
+.ico{width:16px; height:16px; color:var(--muted)}
+.btn.primary .ico{color:white}
+
+.fileList{ padding:0; }
+
+.row{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:10px 12px;
+  border-bottom:1px solid var(--border);
+}
+.row:last-child{border-bottom:none}
+.row:hover{background:rgba(255,255,255,.02)}
+.row.selected{background:rgba(31,111,235,.12); outline:1px solid rgba(31,111,235,.25); outline-offset:-1px}
+.row.ignored{opacity:.72}
+
+.rowLeft{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  min-width:0;
+  flex:1;
+}
+
+.caret{
+  width:18px; height:18px;
+  border-radius:6px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  color:var(--muted);
+  cursor:pointer;
+}
+.caret:hover{background:rgba(255,255,255,.03); color:var(--text)}
+.caret .ico{width:14px; height:14px}
+
+.fileIco{color:var(--muted)}
+.row:hover .fileIco{color:var(--text)}
+
+.name{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  cursor:default;
+}
+
+.actions{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  opacity:0;
+  pointer-events:none;
+  transition:.12s ease;
+}
+.row:hover .actions{opacity:1; pointer-events:auto}
+.row.ignored .actions{opacity:1; pointer-events:auto}
+
+.actionBtn{
+  border:1px solid transparent;
+  background:transparent;
+  color:var(--muted);
+  border-radius:8px;
+  padding:6px;
+  cursor:pointer;
+  display:inline-flex;
+}
+.actionBtn:hover{background:rgba(255,255,255,.03); color:var(--text); border-color:var(--border)}
+.actionBtn .ico{width:16px; height:16px}
+
+.badge{
+  font-size:11px;
+  padding:2px 8px;
+  border-radius:999px;
+  border:1px solid var(--border);
+  color:var(--muted);
+  background:rgba(0,0,0,.15);
+}
+
+.tabs{
+  display:flex;
+  gap:6px;
+  padding:10px 10px 0 10px;
+  border-bottom:1px solid var(--border);
+}
+
+.tab{
+  appearance:none;
+  border:1px solid var(--border);
+  background:transparent;
+  color:var(--muted);
+  border-radius:10px 10px 0 0;
+  padding:8px 10px;
+  cursor:pointer;
+}
+
+.tab.active{
+  color:var(--text);
+  background:rgba(13,17,23,.25);
+  border-bottom-color:transparent;
+}
+
+.tabBody{padding:12px}
+.tabPanel{display:none}
+.tabPanel.active{display:block}
+
+.card{
+  border:1px solid var(--border);
+  background:rgba(13,17,23,.25);
+  border-radius:var(--r2);
+  padding:12px;
+  margin-bottom:12px;
+}
+
+.cardTitle{font-weight:700; margin-bottom:10px}
+.cardRow{display:flex; gap:10px; align-items:center; margin-bottom:10px}
+.cardRow.spread{justify-content:space-between}
+.hint{color:var(--muted); font-size:12px; line-height:1.4}
+.hint b{color:var(--text)}
+.hint.warn{color:rgba(248,81,73,.95)}
+
+.logBox{
+  margin:0;
+  height:320px;
+  overflow:auto;
+  padding:10px;
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:rgba(0,0,0,.18);
+  font-family:var(--mono);
+  font-size:12.5px;
+  color:var(--text);
+  white-space:pre-wrap;
+}
+
+/* Patch UI */
+.mono{ font-family:var(--mono); }
+
+.rwWrap{
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:rgba(0,0,0,.14);
+  padding:10px;
+  margin:8px 0 12px 0;
+}
+
+.rwHead{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-bottom:8px;
+}
+
+.rwList{
+  max-height:120px;
+  overflow:auto;
+  padding:8px;
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:rgba(0,0,0,.16);
+  font-size:12.5px;
+}
+
+.rwItem{
+  padding:6px 6px;
+  border-bottom:1px solid rgba(48,54,61,.6);
+}
+.rwItem:last-child{border-bottom:none}
+
+.rwEmpty{
+  color:var(--muted);
+  padding:6px 6px;
+}
+
+.textarea{
+  width:100%;
+  height:220px;
+  resize:vertical;
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:rgba(0,0,0,.18);
+  color:var(--text);
+  padding:10px;
+  outline:none;
+  line-height:1.35;
+}
+.textarea:focus{
+  border-color:rgba(31,111,235,.5);
+  box-shadow:0 0 0 3px rgba(31,111,235,.15);
+}
+
+/* Tool info box */
+.toolBox{
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:rgba(0,0,0,.14);
+  padding:10px;
+  margin:10px 0;
+}
+
+.toolRow{
+  display:grid;
+  grid-template-columns: 90px 1fr;
+  gap:10px;
+  padding:6px 0;
+  border-bottom:1px solid rgba(48,54,61,.55);
+}
+.toolRow:last-child{border-bottom:none}
+
+.toolLabel{
+  color:var(--muted);
+  font-size:12px;
+}
+.toolValue{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.details{
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:rgba(0,0,0,.12);
+  padding:8px 10px;
+}
+.details summary{
+  cursor:pointer;
+  color:var(--text);
+  font-weight:600;
+  user-select:none;
+}
+.detailsBody{
+  padding-top:10px;
+}
+
+.docList{ margin-top:8px; }
+.docItem{
+  color:var(--text);
+  font-size:12.5px;
+  padding:4px 0;
+}
+
+.codeBox{
+  margin:8px 0 0 0;
+  max-height:180px;
+  overflow:auto;
+  padding:10px;
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:rgba(0,0,0,.18);
+  white-space:pre;
+}
+
+/* ─────────────────────────────────────────────
+   NEW: Floating File View cards
+───────────────────────────────────────────── */
+.fvLayer{
+  position:fixed;
+  inset:0;
+  z-index:999;
+  pointer-events:none; /* layer itself doesn't block clicks */
+}
+
+.fvCard{
+  position:absolute;
+  pointer-events:auto;
+  width:560px;
+  height:360px;
+  min-width:320px;
+  min-height:220px;
+  max-width:92vw;
+  max-height:86vh;
+
+  background:rgba(13,17,23,.98);
+  border:1px solid var(--border);
+  border-radius:12px;
+  border-color: rgba(240,246,252,.12);
+  box-shadow:
+  0 8px 22px rgba(0,0,0,.22),
+  0 2px 8px rgba(0,0,0,.16);
+overflow:hidden;
+
+  resize: both;
+}
+
+.fvHead{
+  height:44px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  padding:0 10px;
+  border-bottom:1px solid var(--border);
+  background:rgba(22,27,34,.92);
+  cursor:move;
+  user-select:none;
+}
+
+.fvHeadLeft{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  min-width:0;
+}
+
+.fvTypeIcon{
+  width:24px;
+  height:24px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  color:var(--text);
+  flex:0 0 auto;
+}
+
+.fvTypeIcon .ico{
+  width:22px;
+  height:22px;
+}
+
+.fvTitle{
+  font-weight:650;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.fvMeta{
+  font-size:12px;
+  color:var(--muted);
+  white-space:nowrap;
+}
+
+.fvHeadRight{
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+
+.fvBtn{
+  border:1px solid transparent;
+  background:transparent;
+  color:var(--muted);
+  border-radius:8px;
+  padding:6px;
+  cursor:pointer;
+  display:inline-flex;
+}
+.fvBtn:hover{
+  background:rgba(255,255,255,.03);
+  color:var(--text);
+  border-color:var(--border);
+}
+
+.fvBody{
+  height:calc(100% - 44px);
+  overflow:auto;
+  background:rgba(0,0,0,.18);
+}
+
+
+.fvViewer{
+  height:100%;
+}
+
+.fvEditor{
+  width:100%;
+  height:100%;
+  margin:0;
+  border:0;
+  outline:none;
+  padding:12px 14px;
+  font-family:var(--mono);
+  font-size:12.5px;
+  line-height:1.45;
+  background:rgba(0,0,0,.10);
+  color:var(--text);
+  resize:none;
+  white-space:pre;
+  overflow:auto;
+}
+
+.fvBtn.active{
+  background:rgba(31,111,235,.10);
+  border-color:rgba(31,111,235,.35);
+  color:var(--text);
+}
+
+
+.fvCode{
+  margin:0;
+  padding:12px 14px;
+  font-family:var(--mono);
+  font-size:12.5px;
+  line-height:1.45;
+  white-space:pre;
+  color:var(--text);
+}
+
+/* simple GitHub-like token colors */
+.tok-comment{ color:#8b949e; }
+.tok-string{ color:#a5d6ff; }
+.tok-number{ color:#d2a8ff; }
+.tok-keyword{ color:#ff7b72; }
+.tok-boolean{ color:#79c0ff; }
+.tok-null{ color:#79c0ff; }
+.tok-punct{ color:#c9d1d9; }
+
+/* Markdown preview inside File View (.md) */
+.fvBtn.active{
+  background:rgba(88,166,255,.10);
+  color:var(--text);
+  border-color:rgba(88,166,255,.22);
+}
+
+.fvMd{
+  padding:14px 16px;
+  color:var(--text);
+  font-size:13.5px;
+  line-height:1.55;
+}
+.fvMd h1,.fvMd h2,.fvMd h3{
+  margin:14px 0 10px 0;
+  font-weight:750;
+  line-height:1.25;
+}
+.fvMd h1{font-size:20px; border-bottom:1px solid rgba(240,246,252,.12); padding-bottom:6px;}
+.fvMd h2{font-size:17px; border-bottom:1px solid rgba(240,246,252,.10); padding-bottom:4px;}
+.fvMd h3{font-size:15px;}
+.fvMd p{margin:10px 0;}
+.fvMd a{color:#58a6ff; text-decoration:none;}
+.fvMd a:hover{text-decoration:underline;}
+.fvMd ul{margin:8px 0 8px 18px; padding:0;}
+.fvMd li{margin:4px 0;}
+.fvMd blockquote{
+  margin:10px 0;
+  padding:8px 12px;
+  border-left:3px solid rgba(240,246,252,.12);
+  background:rgba(255,255,255,.02);
+  color:var(--muted);
+}
+.fvMd hr{
+  border:none;
+  border-top:1px solid rgba(240,246,252,.10);
+  margin:14px 0;
+}
+
+.mdInline{
+  padding:2px 6px;
+  border:1px solid rgba(240,246,252,.10);
+  border-radius:6px;
+  background:rgba(0,0,0,.18);
+  font-family:var(--mono);
+  font-size:12.5px;
+}
+.mdCode{
+  margin:10px 0;
+  padding:12px 14px;
+  border:1px solid rgba(240,246,252,.10);
+  border-radius:10px;
+  background:rgba(0,0,0,.20);
+  overflow:auto;
+  font-family:var(--mono);
+  font-size:12.5px;
+  line-height:1.45;
+  white-space:pre;
+}
+.mdEmpty{color:var(--muted);}
+
+
+/* NEW: discard confirm bar (visual confirmation when leaving edit with unsaved changes) */
+.fvConfirmBar{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  padding:8px 10px;
+  border-bottom:1px solid rgba(240,246,252,.10);
+  background:rgba(248,81,73,.10);
+}
+.fvConfirmText{
+  color:var(--text);
+  font-size:12.5px;
+}
+.fvConfirmActions{
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+.fvMiniBtn{
+  border:1px solid rgba(240,246,252,.12);
+  background:rgba(255,255,255,.03);
+  color:var(--text);
+  border-radius:8px;
+  padding:6px 10px;
+  cursor:pointer;
+  font-size:12.5px;
+}
+.fvMiniBtn:hover{background:rgba(255,255,255,.05)}
+.fvMiniBtn.danger{
+  border-color:rgba(248,81,73,.35);
+  background:rgba(248,81,73,.16);
+}
+.fvMiniBtn.danger:hover{background:rgba(248,81,73,.22)}
+
+
+/* Fullscreen (B): cover all except topbar */
+.fvCard.fvFullscreen{
+  position: fixed !important;
+  left: 0 !important;
+  top: var(--topbarH, 56px) !important;
+  width: 100vw !important;
+  height: calc(100vh - var(--topbarH, 56px)) !important;
+  max-width: none !important;
+  max-height: none !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  resize: none !important;
+  border-radius: 0 !important;
+  z-index: 9999 !important;
+}
+
+
+/* PATCH: hide underlying layout while a File View card is fullscreen (prevents sidebar bleed-through) */
+body.has-fv-fullscreen .layout{
+  visibility:hidden !important;
+}
+
+
+
+/* ─────────────────────────────────────────────
+   Toasts (bottom-right)
+*/
+.toastHost{
+  position:fixed;
+  right:16px;
+  bottom:16px;
+  z-index:99999;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  pointer-events:none;
+}
+.toast{
+  pointer-events:auto;
+  min-width:240px;
+  max-width:360px;
+  background:rgba(22,27,34,0.96);
+  border:1px solid var(--border);
+  border-radius:12px;
+  box-shadow:0 10px 28px rgba(0,0,0,0.30);
+  padding:10px 10px;
+  display:flex;
+  align-items:flex-start;
+  gap:10px;
+  transform:translateY(6px);
+  opacity:0;
+  animation:toastIn .16s ease-out forwards;
+}
+.toastBody{
+  flex:1;
+  color:var(--text);
+  font-size:13px;
+  line-height:1.35;
+  white-space:pre-wrap;
+  word-break:break-word;
+}
+.toastX{
+  width:26px;
+  height:26px;
+  border-radius:8px;
+  border:1px solid var(--border);
+  background:transparent;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  cursor:pointer;
+  opacity:0.85;
+}
+.toastX:hover{opacity:1}
+.toastX svg{width:14px;height:14px;fill:currentColor}
+.toast-success{border-color:rgba(63,185,80,0.55)}
+.toast-warn{border-color:rgba(210,153,34,0.55)}
+.toast-error{border-color:rgba(248,81,73,0.55)}
+.toast-info{border-color:rgba(31,111,235,0.55)}
+.toast.leaving{
+  animation:toastOut .18s ease-in forwards;
+}
+@keyframes toastIn{
+  from{opacity:0; transform:translateY(10px)}
+  to{opacity:1; transform:translateY(0)}
+}
+@keyframes toastOut{
+  from{opacity:1; transform:translateY(0)}
+  to{opacity:0; transform:translateY(10px)}
+}
+
+/* === Scroll containment (IDE-like) === */
+html, body{ height:100%; }
+body{ overflow:hidden; }
+
+/* keep the whole app as a viewport container; scroll happens inside panels */
+.app{ height:100vh; }
+.layout{ min-height:0; overflow:hidden; }
+
+/* make both columns behave like IDE panes */
+.panel.files,
+.panel.right{
+  display:flex;
+  flex-direction:column;
+  min-height:0;
+}
+
+/* left file tree scrolls inside its own pane */
+.fileList{
+  flex:1;
+  min-height:0;
+  overflow:auto;
+}
+
+/* right side tabs: header fixed, content scrolls */
+.tabs{ flex:0 0 auto; }
+.tabBody{
+  flex:1;
+  min-height:0;
+  overflow:auto;
+}
+
+
+/* PATCH: execution state (disable + subtle busy look) */
+.btn.busy{
+  cursor:progress;
+  opacity:.75;
+  transform:none !important;
+}
+.btn.busy:hover{
+  border-color:var(--border) !important;
+  transform:none !important;
+}
+
+
+/* PATCH: fix toast close button alignment (keep X on far right) */
+.toast{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+}
+
+.toast .toastBodyWrap{
+  flex:1 1 auto;
+  min-width:0;
+}
+
+.toast .toastX{
+  flex:0 0 auto;
+  align-self:center;
+  margin-left:8px;
+}
+
+
+/* PATCH: refresh button better icon sizing + busy feedback */
+.panelTitleRow .headBtn .ico{ width:16px; height:16px; }
+
+.headBtn.busy{
+  opacity:.75;
+  cursor:progress;
+  pointer-events:none;
+}
+
+.headBtn.busy .ico{
+  animation: spin 0.9s linear infinite;
+  color: var(--text);
+}
+
+@keyframes spin{
+  from{ transform:rotate(0deg); }
+  to{ transform:rotate(360deg); }
+}
+
+
+/* PATCH: refresh button alignment (Files header) */
+.panelTitleRow{ gap:10px; }
+.panelTitle{ line-height:1; }
+
+.panelTitleRow .headBtn{
+  width:28px;
+  height:28px;
+  padding:0;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+}
+
+.panelTitleRow .headBtn .ico{
+  width:14px;
+  height:14px;
+}
+
+/* keep hover consistent */
+.panelTitleRow .headBtn:hover .ico{ color:var(--text); }
+
+/* PATCH: prevent double scrollbar in File View editor (outer body + textarea) */
+.fvCard[data-editing="1"] .fvBody{
+  overflow: hidden !important; /* outer must NOT scroll while editing */
+}
+
+.fvCard[data-editing="1"] textarea,
+.fvCard[data-editing="1"] .fvEditor,
+.fvCard[data-editing="1"] .editor,
+.fvCard[data-editing="1"] .codeEditor{
+  overflow: auto !important;   /* inner editor owns scrolling */
+}
+

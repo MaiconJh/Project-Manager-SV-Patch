@@ -1,0 +1,263 @@
+{
+  "root": "C:\\Users\\Maicon\\Desktop\\Project-Manager-SV-Patch",
+  "plan_only": false,
+  "strict": false,
+  "backup": true,
+  "rollback_on_fail": true,
+  "workers": 8,
+  "limits": {
+    "max_files": 500,
+    "max_total_write_bytes": 10000000,
+    "allowlist_prefixes": [
+      "."
+    ]
+  },
+  "steps": [
+    {
+      "name": "rw-01",
+      "scripts": [
+        {
+          "script": "changes/first-path.rw",
+          "files": [
+            {
+              "file": "src/.keep",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 4,
+                  "op": "CREATE_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 5,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                }
+              ],
+              "diff": "--- src/.keep\n+++ src/.keep\n@@ -0,0 +1 @@\n+\n\n",
+              "bytes_before": 0,
+              "bytes_after": 1,
+              "sha256_before": null,
+              "sha256_after": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+              "is_new": true
+            },
+            {
+              "file": "tools/.keep",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 7,
+                  "op": "CREATE_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 8,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                }
+              ],
+              "diff": "--- tools/.keep\n+++ tools/.keep\n@@ -0,0 +1 @@\n+\n\n",
+              "bytes_before": 0,
+              "bytes_after": 1,
+              "sha256_before": null,
+              "sha256_after": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+              "is_new": true
+            },
+            {
+              "file": "tools/sv_patch/.keep",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 10,
+                  "op": "CREATE_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 11,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                }
+              ],
+              "diff": "--- tools/sv_patch/.keep\n+++ tools/sv_patch/.keep\n@@ -0,0 +1 @@\n+\n\n",
+              "bytes_before": 0,
+              "bytes_after": 1,
+              "sha256_before": null,
+              "sha256_after": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+              "is_new": true
+            },
+            {
+              "file": "data/.keep",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 13,
+                  "op": "CREATE_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 14,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                }
+              ],
+              "diff": "--- data/.keep\n+++ data/.keep\n@@ -0,0 +1 @@\n+\n\n",
+              "bytes_before": 0,
+              "bytes_after": 1,
+              "sha256_before": null,
+              "sha256_after": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+              "is_new": true
+            },
+            {
+              "file": "docs/.keep",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 16,
+                  "op": "CREATE_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 17,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                }
+              ],
+              "diff": "--- docs/.keep\n+++ docs/.keep\n@@ -0,0 +1 @@\n+\n\n",
+              "bytes_before": 0,
+              "bytes_after": 1,
+              "sha256_before": null,
+              "sha256_after": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+              "is_new": true
+            },
+            {
+              "file": "README.md",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 20,
+                  "op": "CREATE_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 21,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                },
+                {
+                  "line": 22,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                },
+                {
+                  "line": 23,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                },
+                {
+                  "line": 24,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                }
+              ],
+              "diff": "--- README.md\n+++ README.md\n@@ -0,0 +1,4 @@\n+\n\n+Desktop IDE-like tool for structured patch orchestration, project visualization, and controlled file editing using Safe-Vibe Patch pipelines.\n\n+\n\n+# Project Manager & SV Patch\n\n",
+              "bytes_before": 0,
+              "bytes_after": 173,
+              "sha256_before": null,
+              "sha256_after": "9ef5273886cf39dc4382b9c4338614867fb8f683283e126709e1e16fc054a6e9",
+              "is_new": true
+            },
+            {
+              "file": ".gitignore",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 27,
+                  "op": "CREATE_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 28,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                },
+                {
+                  "line": 29,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                },
+                {
+                  "line": 30,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                },
+                {
+                  "line": 31,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                },
+                {
+                  "line": 32,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                },
+                {
+                  "line": 33,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                },
+                {
+                  "line": 34,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                },
+                {
+                  "line": 35,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                },
+                {
+                  "line": 36,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                },
+                {
+                  "line": 37,
+                  "op": "INSERT_AFTER_REGEX",
+                  "changed": 1
+                }
+              ],
+              "diff": "--- .gitignore\n+++ .gitignore\n@@ -0,0 +1,11 @@\n+\n\n+node_modules/\n\n+dist/\n\n+build/\n\n+.env\n\n+*.log\n\n+data/index/\n\n+data/pipelines/\n\n+data/temp/\n\n+__pycache__/\n\n+*.pyc\n",
+              "bytes_before": 0,
+              "bytes_after": 96,
+              "sha256_before": null,
+              "sha256_after": "4a0e123a1e083db73a0d3bdf755d43cc3c871441e81bb89d1a2432c0ed0567f3",
+              "is_new": true
+            }
+          ],
+          "errors": []
+        }
+      ],
+      "status": "OK"
+    }
+  ],
+  "errors": [],
+  "rollback": {
+    "attempted": false,
+    "files_restored": [],
+    "files_removed": []
+  },
+  "rejects": [],
+  "scans": [],
+  "summary_path": "C:\\Users\\Maicon\\Desktop\\Project-Manager-SV-Patch\\data\\index\\changes-summary.md",
+  "duration_ms": 15,
+  "pipeline": {
+    "steps": [
+      {
+        "name": "rw-01",
+        "scripts": [
+          "changes/first-path.rw"
+        ]
+      }
+    ]
+  }
+}

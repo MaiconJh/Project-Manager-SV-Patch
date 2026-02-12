@@ -1,0 +1,47 @@
+{
+  "toolset_id": "sv_patch_toolset",
+  "name": "SV Patch Toolset",
+  "tools": [
+    {
+      "tool_id": "sv_patch",
+      "name": "SV Patch",
+      "version": "DeepSeekV*",
+      "description": "Patch orchestrator based on pipeline.json + .rw scripts",
+      "runner": "sv_patch-(DeepSeekV1).py",
+      "entry": {
+        "windows": ["py", "-3", "{runner}"],
+        "unix": ["python3", "{runner}"]
+      },
+      "args": {
+        "root": "--root",
+        "pipeline": "--pipeline",
+        "plan": "--plan",
+        "apply": "--apply",
+        "report": "--report",
+        "backup": "--backup",
+        "rollback": "--rollback-on-fail"
+      },
+      "outputs": {
+        "report_default": "sv-report.json"
+      },
+      "help": {
+        "how_to": [
+          "Select Runner Path (toolset folder)",
+          "Open a project folder",
+          "Pick one or more .rw scripts (must be inside project root)",
+          "Edit pipeline JSON if needed",
+          "Save pipeline",
+          "Run Plan (dry-run) or Run Apply (writes changes)"
+        ],
+        "examples": {
+          "pipeline.json": {
+            "version": 1,
+            "steps": [
+              { "name": "rw-01", "scripts": ["changes/01-example.rw"] }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

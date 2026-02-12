@@ -1,0 +1,11 @@
+
+node_modules/
+dist/
+build/
+.env
+*.log
+data/index/
+data/pipelines/
+data/temp/
+__pycache__/
+*.pyc

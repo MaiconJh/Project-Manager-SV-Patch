@@ -1,0 +1,13 @@
+{
+  "name": "project-manager-sv-patch",
+  "version": "1.0.0",
+  "private": true,
+  "main": "app.js",
+  "description": "Project Manager & SV Patch (Electron, GitHub-like file manager UI)",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^40.2.1"
+  }
+}

@@ -14,6 +14,27 @@ let selectedId = null;
 
 let currentPipelinePath = null;
 let lastSnapshot = null;
+let _applyDiffPreviewNonce = 0;
+
+const _applyDiffState = {
+  open: false,
+  busy: false,
+  preview: null,
+  files: [],
+  filtered: [],
+  selectedPath: "",
+};
+
+// File list virtualization state (keeps DOM small on large trees)
+const _fileListVirtual = {
+  overscan: 10,
+  rowHeight: 40,
+  scrollRAF: 0,
+  resizeRAF: 0,
+  bound: false,
+};
+let _fileRowsCache = [];
+let _fileRowsSnapshot = null;
 
 // ─────────────────────────────────────────────
 // Auto-refresh (triggered by main-process watcher)
@@ -760,6 +781,172 @@ function flattenTree(node, depth, out, ignoredSet) {
   }
 }
 
+function _virtualRange(total, rowH, viewportH, scrollTop, overscan) {
+  if (!total) return { start: 0, end: 0 };
+  const first = Math.floor(scrollTop / rowH);
+  const visible = Math.max(1, Math.ceil(viewportH / rowH));
+  const start = Math.max(0, first - overscan);
+  const end = Math.min(total, first + visible + overscan);
+  return { start, end };
+}
+
+function _buildFileRow(r, snapshot) {
+  const row = document.createElement("div");
+  row.className = "row" + (r.id === selectedId ? " selected" : "") + (r.ignored ? " ignored" : "");
+
+  const indentPx = r.depth * 16;
+
+  const caret = r.isDir
+    ? `<span class="caret" data-caret="1" title="${expanded.has(r.id) ? "Collapse" : "Expand"}">
+        ${expanded.has(r.id) ? svgUse("icon-chevron-down") : svgUse("icon-chevron-right")}
+      </span>`
+    : `<span class="caret" style="visibility:hidden">${svgUse("icon-chevron-right")}</span>`;
+
+  const icon = r.isDir ? svgUse("icon-folder") : svgUse("icon-file");
+  const eyeIcon = r.ignored ? "icon-eye-off" : "icon-eye";
+
+  // file view button (only for files)
+  const viewBtn = !r.isDir
+    ? `<button class="actionBtn" data-view="1" title="View file">${svgUse("icon-file-view")}</button>`
+    : ``;
+
+  row.innerHTML = `
+    <div class="rowLeft" style="padding-left:${indentPx}px">
+      ${caret}
+      <span class="fileIco">${icon}</span>
+      <div class="name" title="${r.name}">${r.name}</div>
+      <div class="actions">
+        ${viewBtn}
+        <button class="actionBtn" data-eye="1" title="${r.ignored ? "Unignore" : "Ignore"}">
+          ${svgUse(eyeIcon)}
+        </button>
+        ${r.ignored ? `<span class="badge">Ignored</span>` : ``}
+      </div>
+    </div>
+  `;
+
+  row.addEventListener("click", (e) => {
+    const target = e.target;
+    if (
+      target.closest &&
+      (target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
+    )
+      return;
+    selectedId = r.id;
+    render(snapshot);
+  });
+
+  row.querySelector("[data-caret]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!r.isDir) return;
+    if (expanded.has(r.id)) expanded.delete(r.id);
+    else expanded.add(r.id);
+    render(snapshot);
+  });
+
+  row.querySelector("[data-eye]")?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    await ipcRenderer.invoke("tree:toggleIgnored", r.absPath);
+  });
+
+  row.querySelector("[data-view]")?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const res = await ipcRenderer.invoke("file:read", r.absPath);
+    if (!res || !res.ok) {
+      addLog(`[FILE_VIEW] ${res?.error || "Unable to read file."}`);
+      return;
+    }
+    makeFileCard({
+      absPath: r.absPath,
+      relPath: res.meta?.relPath || r.name,
+      ext: res.meta?.ext || "",
+      sizeBytes: res.meta?.sizeBytes || 0,
+      content: res.content || "",
+    });
+  });
+
+  row.addEventListener("dblclick", async (e) => {
+    const target = e.target;
+    if (
+      target.closest &&
+      (target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
+    )
+      return;
+
+    // comportamento atual: duplo clique alterna ignore/unignore
+    await ipcRenderer.invoke("tree:toggleIgnored", r.absPath);
+  });
+
+  return row;
+}
+
+function _renderVirtualFileRows(list, rows, snapshot) {
+  const total = rows.length;
+  const rowH = Math.max(28, _fileListVirtual.rowHeight || 40);
+  const viewportH = Math.max(1, list.clientHeight || 1);
+  const scrollTop = Math.max(0, list.scrollTop || 0);
+  const { start, end } = _virtualRange(total, rowH, viewportH, scrollTop, _fileListVirtual.overscan);
+
+  const topPad = document.createElement("div");
+  topPad.style.height = `${Math.max(0, start * rowH)}px`;
+  topPad.setAttribute("aria-hidden", "true");
+
+  const bottomPad = document.createElement("div");
+  bottomPad.style.height = `${Math.max(0, (total - end) * rowH)}px`;
+  bottomPad.setAttribute("aria-hidden", "true");
+
+  const frag = document.createDocumentFragment();
+  frag.appendChild(topPad);
+  for (let i = start; i < end; i++) {
+    frag.appendChild(_buildFileRow(rows[i], snapshot));
+  }
+  frag.appendChild(bottomPad);
+
+  list.innerHTML = "";
+  list.appendChild(frag);
+
+  // Keep row height estimate in sync with real rendered row size.
+  const firstRow = list.querySelector(".row");
+  if (firstRow) {
+    const measured = Math.round(firstRow.getBoundingClientRect().height);
+    if (measured >= 28 && measured <= 96) _fileListVirtual.rowHeight = measured;
+  }
+}
+
+function _rerenderVirtualFileList() {
+  const list = el("fileList");
+  if (!list) return;
+  if (!_fileRowsSnapshot) return;
+  _renderVirtualFileRows(list, _fileRowsCache || [], _fileRowsSnapshot);
+}
+
+function _bindFileListVirtualEvents() {
+  if (_fileListVirtual.bound) return;
+  const list = el("fileList");
+  if (!list) return;
+  _fileListVirtual.bound = true;
+
+  list.addEventListener(
+    "scroll",
+    () => {
+      if (_fileListVirtual.scrollRAF) return;
+      _fileListVirtual.scrollRAF = requestAnimationFrame(() => {
+        _fileListVirtual.scrollRAF = 0;
+        _rerenderVirtualFileList();
+      });
+    },
+    { passive: true }
+  );
+
+  window.addEventListener("resize", () => {
+    if (_fileListVirtual.resizeRAF) return;
+    _fileListVirtual.resizeRAF = requestAnimationFrame(() => {
+      _fileListVirtual.resizeRAF = 0;
+      _rerenderVirtualFileList();
+    });
+  });
+}
+
 function addLog(line) {
   const box = el("logBox");
   box.textContent += line + "\n";
@@ -880,108 +1067,728 @@ try{
   const list = el("fileList");
   list.innerHTML = "";
 
-  if (!snapshot.tree) return;
+  if (!snapshot.tree) {
+    _fileRowsCache = [];
+    _fileRowsSnapshot = null;
+    return;
+  }
 
   const rows = [];
   for (const ch of snapshot.tree.children || []) {
     flattenTree(ch, 0, rows, ignoredSet);
   }
 
-  for (const r of rows) {
-    const row = document.createElement("div");
-    row.className = "row" + (r.id === selectedId ? " selected" : "") + (r.ignored ? " ignored" : "");
+  _fileRowsCache = rows;
+  _fileRowsSnapshot = snapshot;
+  _renderVirtualFileRows(list, rows, snapshot);
+}
 
-    const indentPx = r.depth * 16;
+function _previewActionLabel(action) {
+  const a = String(action || "").toLowerCase();
+  if (a.includes("create") || a.includes("add") || a.includes("new")) return "ADD";
+  if (a.includes("delete") || a.includes("remove")) return "DEL";
+  if (a.includes("modify") || a.includes("update") || a.includes("change")) return "MOD";
+  return "CHG";
+}
 
-    const caret = r.isDir
-      ? `<span class="caret" data-caret="1" title="${expanded.has(r.id) ? "Collapse" : "Expand"}">
-          ${expanded.has(r.id) ? svgUse("icon-chevron-down") : svgUse("icon-chevron-right")}
-        </span>`
-      : `<span class="caret" style="visibility:hidden">${svgUse("icon-chevron-right")}</span>`;
+function _previewActionClass(action) {
+  const a = _previewActionLabel(action);
+  if (a === "ADD") return "add";
+  if (a === "DEL") return "del";
+  return "mod";
+}
 
-    const icon = r.isDir ? svgUse("icon-folder") : svgUse("icon-file");
-    const eyeIcon = r.ignored ? "icon-eye-off" : "icon-eye";
+function _normalizePreviewFiles(preview) {
+  const src = Array.isArray(preview?.files)
+    ? preview.files
+    : Array.isArray(preview?.changes)
+    ? preview.changes
+    : [];
 
-    // file view button (only for files)
-    const viewBtn = !r.isDir
-      ? `<button class="actionBtn" data-view="1" title="View file">${svgUse("icon-file-view")}</button>`
-      : ``;
-
-    row.innerHTML = `
-      <div class="rowLeft" style="padding-left:${indentPx}px">
-        ${caret}
-        <span class="fileIco">${icon}</span>
-        <div class="name" title="${r.name}">${r.name}</div>
-        <div class="actions">
-          ${viewBtn}
-          <button class="actionBtn" data-eye="1" title="${r.ignored ? "Unignore" : "Ignore"}">
-            ${svgUse(eyeIcon)}
-          </button>
-          ${r.ignored ? `<span class="badge">Ignored</span>` : ``}
-        </div>
-      </div>
-    `;
-
-    row.addEventListener("click", (e) => {
-      const target = e.target;
-      if (
-        target.closest &&
-        (target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
-      )
-        return;
-      selectedId = r.id;
-      render(snapshot);
+  const out = [];
+  const seen = new Set();
+  for (const item of src) {
+    const p = String(item?.path || "").trim();
+    if (!p || seen.has(p)) continue;
+    seen.add(p);
+    out.push({
+      path: p,
+      action: _previewActionLabel(item?.action),
+      beforeText: typeof item?.beforeText === "string" ? item.beforeText : "",
+      afterText: typeof item?.afterText === "string" ? item.afterText : "",
+      diffText: typeof item?.diffText === "string" ? item.diffText : "",
+      hasBefore: Boolean(item?.hasBefore),
+      hasAfter: Boolean(item?.hasAfter),
+      beforeSource: typeof item?.beforeSource === "string" ? item.beforeSource : "",
+      afterSource: typeof item?.afterSource === "string" ? item.afterSource : "",
     });
-
-    row.querySelector("[data-caret]")?.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (!r.isDir) return;
-      if (expanded.has(r.id)) expanded.delete(r.id);
-      else expanded.add(r.id);
-      render(snapshot);
-    });
-
-    row.querySelector("[data-eye]")?.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      await ipcRenderer.invoke("tree:toggleIgnored", r.absPath);
-    });
-
-    row.querySelector("[data-view]")?.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      const res = await ipcRenderer.invoke("file:read", r.absPath);
-      if (!res || !res.ok) {
-        addLog(`[FILE_VIEW] ${res?.error || "Unable to read file."}`);
-        return;
-      }
-      makeFileCard({
-        absPath: r.absPath,
-        relPath: res.meta?.relPath || r.name,
-        ext: res.meta?.ext || "",
-        sizeBytes: res.meta?.sizeBytes || 0,
-        content: res.content || "",
-      });
-    });
-
-    row.addEventListener("dblclick", async (e) => {
-      const target = e.target;
-      if (
-        target.closest &&
-        (target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
-      )
-        return;
-
-      // comportamento atual: duplo clique alterna ignore/unignore
-      await ipcRenderer.invoke("tree:toggleIgnored", r.absPath);
-    });
-
-    list.appendChild(row);
   }
+  return out;
+}
+
+function _logApplyPreviewSummary(preview) {
+  if (!preview || typeof preview !== "object") return;
+
+  addLog(
+    `[APPLY_PREVIEW] exit=${preview.exitCode ?? "?"} changes=${preview.changesCount ?? 0} errors=${
+      preview.errorsCount ?? 0
+    } rejects=${preview.rejectsCount ?? 0}`
+  );
+
+  const changes = Array.isArray(preview.changes) ? preview.changes : [];
+  const take = changes.slice(0, 20);
+  for (const c of take) {
+    addLog(`[APPLY_PREVIEW] ${_previewActionLabel(c?.action)} ${c?.path || "(unknown)"}`);
+  }
+  if (changes.length > take.length) {
+    addLog(`[APPLY_PREVIEW] ... +${changes.length - take.length} more`);
+  }
+
+  if (preview.reportPath) addLog(`[APPLY_PREVIEW] report: ${preview.reportPath}`);
+  if (preview.summaryPath) addLog(`[APPLY_PREVIEW] summary: ${preview.summaryPath}`);
+}
+
+function _buildApplyPreviewConfirmText(preview) {
+  const lines = [];
+  lines.push("Apply preview completed (Plan mode).");
+  lines.push(`Potential changes: ${preview.changesCount ?? 0}`);
+  lines.push(`Errors: ${preview.errorsCount ?? 0}`);
+  lines.push(`Rejects: ${preview.rejectsCount ?? 0}`);
+
+  const changes = Array.isArray(preview.changes) ? preview.changes : [];
+  if (changes.length) {
+    lines.push("");
+    lines.push("Sample affected files:");
+    for (const c of changes.slice(0, 8)) {
+      lines.push(`- [${_previewActionLabel(c?.action)}] ${c?.path || "(unknown)"}`);
+    }
+    if (changes.length > 8) lines.push(`- ... +${changes.length - 8} more`);
+  }
+
+  lines.push("");
+  lines.push("Proceed with Run Apply?");
+  return lines.join("\n");
 }
 
 // ─────────────────────────────────────────────
 // Wire buttons / UI actions
+function _setApplyDiffOpen(open) {
+  const modal = el("applyDiffModal");
+  if (!modal) return;
+  _applyDiffState.open = !!open;
+  modal.hidden = !open;
+  modal.setAttribute("aria-hidden", open ? "false" : "true");
+  document.body.classList.toggle("has-apply-diff", !!open);
+}
+
+function _setApplyDiffBusy(busy) {
+  _applyDiffState.busy = !!busy;
+  const runBtn = el("btnApplyDiffRunApply");
+  const refreshBtn = el("btnApplyDiffRefresh");
+  const cancelBtn = el("btnApplyDiffCancel");
+  if (runBtn) runBtn.disabled = !!busy || !_applyDiffState.preview?.ok;
+  if (refreshBtn) refreshBtn.disabled = !!busy;
+  if (cancelBtn) cancelBtn.disabled = !!busy;
+}
+
+function _applyDiffMatches(file, search) {
+  const s = String(search || "").trim().toLowerCase();
+  if (!s) return true;
+  return file.path.toLowerCase().includes(s) || String(file.action || "").toLowerCase().includes(s);
+}
+
+function _renderApplyDiffFileList() {
+  const host = el("applyDiffFileList");
+  if (!host) return;
+  host.innerHTML = "";
+
+  const search = el("applyDiffSearch")?.value || "";
+  const files = _applyDiffState.files.filter((f) => _applyDiffMatches(f, search));
+  _applyDiffState.filtered = files;
+
+  if (!files.length) {
+    const div = document.createElement("div");
+    div.className = "applyDiffEmpty";
+    div.textContent = "No files match the current filter.";
+    host.appendChild(div);
+    return;
+  }
+
+  let activePath = _applyDiffState.selectedPath;
+  if (!activePath || !files.some((f) => f.path === activePath)) {
+    activePath = files[0].path;
+    _applyDiffState.selectedPath = activePath;
+  }
+
+  for (const file of files) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "applyDiffFileRow" + (file.path === activePath ? " active" : "");
+    btn.addEventListener("click", () => {
+      _applyDiffState.selectedPath = file.path;
+      _renderApplyDiffFileList();
+      _renderApplyDiffViewer();
+    });
+
+    const badge = document.createElement("span");
+    badge.className = `diffBadge diffBadge-${_previewActionClass(file.action)}`;
+    badge.textContent = _previewActionLabel(file.action);
+    btn.appendChild(badge);
+
+    const name = document.createElement("span");
+    name.className = "applyDiffFilePath mono";
+    name.textContent = file.path;
+    btn.appendChild(name);
+
+    host.appendChild(btn);
+  }
+}
+
+function _splitDiffLines(text) {
+  return String(text || "").replace(/\r\n/g, "\n").split("\n");
+}
+
+function _clipDiffRows(rows, maxRows = 4500) {
+  if (rows.length <= maxRows) return rows;
+  const out = rows.slice(0, maxRows);
+  out.push({
+    leftNo: "",
+    rightNo: "",
+    leftText: "... diff truncated ...",
+    rightText: "... diff truncated ...",
+    leftKind: "mod",
+    rightKind: "mod",
+  });
+  return out;
+}
+
+function _buildRowsFromUnifiedDiff(diffText) {
+  const rows = [];
+  const lines = _splitDiffLines(diffText);
+  let oldNo = 0;
+  let newNo = 0;
+  let inHunk = false;
+  let pendingDel = [];
+
+  const flushPendingDel = () => {
+    while (pendingDel.length) {
+      const d = pendingDel.shift();
+      rows.push({
+        leftNo: d.no,
+        rightNo: "",
+        leftText: d.text,
+        rightText: "",
+        leftKind: "del",
+        rightKind: "empty",
+      });
+    }
+  };
+
+  for (const line of lines) {
+    const hunk = line.match(/^@@\s+\-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/);
+    if (hunk) {
+      flushPendingDel();
+      oldNo = Number(hunk[1]);
+      newNo = Number(hunk[2]);
+      inHunk = true;
+      continue;
+    }
+
+    if (!inHunk) continue;
+    if (line.startsWith("diff --git ")) {
+      flushPendingDel();
+      inHunk = false;
+      continue;
+    }
+    if (line.startsWith("---") || line.startsWith("+++")) continue;
+    if (line.startsWith("\\ No newline")) continue;
+
+    if (line.startsWith("-")) {
+      pendingDel.push({ no: oldNo, text: line.slice(1) });
+      oldNo += 1;
+      continue;
+    }
+
+    if (line.startsWith("+")) {
+      const addNo = newNo;
+      const addText = line.slice(1);
+      newNo += 1;
+      if (pendingDel.length) {
+        const d = pendingDel.shift();
+        rows.push({
+          leftNo: d.no,
+          rightNo: addNo,
+          leftText: d.text,
+          rightText: addText,
+          leftKind: "mod",
+          rightKind: "mod",
+        });
+      } else {
+        rows.push({
+          leftNo: "",
+          rightNo: addNo,
+          leftText: "",
+          rightText: addText,
+          leftKind: "empty",
+          rightKind: "add",
+        });
+      }
+      continue;
+    }
+
+    if (line.startsWith(" ")) {
+      flushPendingDel();
+      rows.push({
+        leftNo: oldNo,
+        rightNo: newNo,
+        leftText: line.slice(1),
+        rightText: line.slice(1),
+        leftKind: "ctx",
+        rightKind: "ctx",
+      });
+      oldNo += 1;
+      newNo += 1;
+      continue;
+    }
+  }
+
+  flushPendingDel();
+  return _clipDiffRows(rows);
+}
+
+function _flushPendingDiffChunks(rows, dels, adds) {
+  while (dels.length || adds.length) {
+    if (dels.length && adds.length) {
+      const d = dels.shift();
+      const a = adds.shift();
+      rows.push({
+        leftNo: d.no,
+        rightNo: a.no,
+        leftText: d.text,
+        rightText: a.text,
+        leftKind: "mod",
+        rightKind: "mod",
+      });
+      continue;
+    }
+    if (dels.length) {
+      const d = dels.shift();
+      rows.push({
+        leftNo: d.no,
+        rightNo: "",
+        leftText: d.text,
+        rightText: "",
+        leftKind: "del",
+        rightKind: "empty",
+      });
+      continue;
+    }
+    const a = adds.shift();
+    rows.push({
+      leftNo: "",
+      rightNo: a.no,
+      leftText: "",
+      rightText: a.text,
+      leftKind: "empty",
+      rightKind: "add",
+    });
+  }
+}
+
+function _buildRowsFromTexts(beforeText, afterText, action) {
+  const rows = [];
+  const before = _splitDiffLines(beforeText);
+  const after = _splitDiffLines(afterText);
+  const kind = _previewActionLabel(action);
+
+  if (kind === "ADD" && after.length) {
+    for (let i = 0; i < after.length; i++) {
+      rows.push({
+        leftNo: "",
+        rightNo: i + 1,
+        leftText: "",
+        rightText: after[i],
+        leftKind: "empty",
+        rightKind: "add",
+      });
+    }
+    return _clipDiffRows(rows);
+  }
+
+  if (kind === "DEL" && before.length) {
+    for (let i = 0; i < before.length; i++) {
+      rows.push({
+        leftNo: i + 1,
+        rightNo: "",
+        leftText: before[i],
+        rightText: "",
+        leftKind: "del",
+        rightKind: "empty",
+      });
+    }
+    return _clipDiffRows(rows);
+  }
+
+  const n = before.length;
+  const m = after.length;
+  if (!n && !m) return [];
+
+  // Avoid heavy matrices for very large files.
+  const CELL_LIMIT = 1200000;
+  if (n * m > CELL_LIMIT) {
+    const maxLen = Math.max(n, m);
+    for (let i = 0; i < maxLen; i++) {
+      const hasLeft = i < n;
+      const hasRight = i < m;
+      rows.push({
+        leftNo: hasLeft ? i + 1 : "",
+        rightNo: hasRight ? i + 1 : "",
+        leftText: hasLeft ? before[i] : "",
+        rightText: hasRight ? after[i] : "",
+        leftKind: hasLeft && hasRight ? (before[i] === after[i] ? "ctx" : "mod") : hasLeft ? "del" : "empty",
+        rightKind: hasLeft && hasRight ? (before[i] === after[i] ? "ctx" : "mod") : hasRight ? "add" : "empty",
+      });
+    }
+    return _clipDiffRows(rows);
+  }
+
+  const cols = m + 1;
+  const dp = new Uint32Array((n + 1) * (m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      const idx = i * cols + j;
+      if (before[i] === after[j]) {
+        dp[idx] = dp[(i + 1) * cols + (j + 1)] + 1;
+      } else {
+        const down = dp[(i + 1) * cols + j];
+        const right = dp[i * cols + (j + 1)];
+        dp[idx] = down >= right ? down : right;
+      }
+    }
+  }
+
+  let i = 0;
+  let j = 0;
+  const pendingDel = [];
+  const pendingAdd = [];
+
+  while (i < n || j < m) {
+    if (i < n && j < m && before[i] === after[j]) {
+      _flushPendingDiffChunks(rows, pendingDel, pendingAdd);
+      rows.push({
+        leftNo: i + 1,
+        rightNo: j + 1,
+        leftText: before[i],
+        rightText: after[j],
+        leftKind: "ctx",
+        rightKind: "ctx",
+      });
+      i += 1;
+      j += 1;
+      continue;
+    }
+
+    const down = i < n ? dp[(i + 1) * cols + j] : 0;
+    const right = j < m ? dp[i * cols + (j + 1)] : 0;
+    if (j < m && (i >= n || right >= down)) {
+      pendingAdd.push({ no: j + 1, text: after[j] });
+      j += 1;
+      continue;
+    }
+    if (i < n) {
+      pendingDel.push({ no: i + 1, text: before[i] });
+      i += 1;
+    }
+  }
+
+  _flushPendingDiffChunks(rows, pendingDel, pendingAdd);
+  return _clipDiffRows(rows);
+}
+
+function _looksUnifiedDiff(diffText) {
+  const s = String(diffText || "");
+  if (!s) return false;
+  if (/^@@\s+\-\d+/m.test(s)) return true;
+  if (/^diff --git /m.test(s)) return true;
+  if (/^(---|\+\+\+) /m.test(s)) return true;
+  return false;
+}
+
+function _buildRowsForPreviewFile(file) {
+  const beforeText = typeof file?.beforeText === "string" ? file.beforeText : "";
+  const afterText = typeof file?.afterText === "string" ? file.afterText : "";
+  const diffText = typeof file?.diffText === "string" ? file.diffText : "";
+  const action = _previewActionLabel(file?.action || "MOD");
+  const hasBefore = Boolean(file?.hasBefore || beforeText);
+  const hasAfter = Boolean(file?.hasAfter || afterText);
+
+  if (_looksUnifiedDiff(diffText)) {
+    const rowsByDiff = _buildRowsFromUnifiedDiff(diffText);
+    if (rowsByDiff.length) return rowsByDiff;
+  }
+
+  if (action === "ADD" && hasAfter) {
+    return _buildRowsFromTexts("", afterText, "ADD");
+  }
+  if (action === "DEL" && hasBefore) {
+    return _buildRowsFromTexts(beforeText, "", "DEL");
+  }
+  if (hasBefore && hasAfter) {
+    return _buildRowsFromTexts(beforeText, afterText, "MOD");
+  }
+
+  return [];
+}
+
+function _isLikelyNewFilePreview(file) {
+  const action = _previewActionLabel(file?.action || "MOD");
+  if (action === "ADD") return true;
+
+  const hasBefore = Boolean(file?.hasBefore || file?.beforeText);
+  const hasAfter = Boolean(file?.hasAfter || file?.afterText);
+  if (!hasBefore && hasAfter) return true;
+
+  const diffText = String(file?.diffText || "");
+  if (!diffText) return false;
+  if (/^new file mode\b/m.test(diffText)) return true;
+  if (/^@@\s+\-0(?:,0)?\s+\+\d+(?:,\d+)?\s+@@/m.test(diffText)) return true;
+  return false;
+}
+
+function _renderDiffColumn(container, rows, side) {
+  if (!container) return;
+  container.innerHTML = "";
+  const frag = document.createDocumentFragment();
+  for (const row of rows) {
+    const kind = side === "left" ? row.leftKind : row.rightKind;
+    const no = side === "left" ? row.leftNo : row.rightNo;
+    const text = side === "left" ? row.leftText : row.rightText;
+
+    const line = document.createElement("div");
+    line.className = `applyDiffLine applyDiffLine-${kind || "ctx"}`;
+
+    const ln = document.createElement("div");
+    ln.className = "applyDiffLn";
+    ln.textContent = no ? String(no) : "";
+    line.appendChild(ln);
+
+    const tx = document.createElement("pre");
+    tx.className = "applyDiffTxt";
+    tx.textContent = String(text || "");
+    line.appendChild(tx);
+
+    frag.appendChild(line);
+  }
+  container.appendChild(frag);
+}
+
+function _syncDiffScroll(beforeEl, afterEl) {
+  if (!beforeEl || !afterEl) return;
+  let lock = false;
+  beforeEl.onscroll = () => {
+    if (lock) return;
+    lock = true;
+    afterEl.scrollTop = beforeEl.scrollTop;
+    afterEl.scrollLeft = beforeEl.scrollLeft;
+    requestAnimationFrame(() => {
+      lock = false;
+    });
+  };
+  afterEl.onscroll = () => {
+    if (lock) return;
+    lock = true;
+    beforeEl.scrollTop = afterEl.scrollTop;
+    beforeEl.scrollLeft = afterEl.scrollLeft;
+    requestAnimationFrame(() => {
+      lock = false;
+    });
+  };
+}
+
+function _renderApplyDiffViewer() {
+  const beforeEl = el("applyDiffBefore");
+  const afterEl = el("applyDiffAfter");
+  const fallback = el("applyDiffFallback");
+  const pathLine = el("applyDiffPathLine");
+  const metaLine = el("applyDiffMetaLine");
+  const grid = el("applyDiffGrid");
+  const panes = grid ? Array.from(grid.querySelectorAll(".applyDiffPane")) : [];
+  const beforePane = panes[0] || null;
+  const afterPane = panes[1] || null;
+  if (!beforeEl || !afterEl || !fallback || !pathLine || !metaLine) return;
+
+  const setSingleAfterMode = (on) => {
+    if (!grid) return;
+    const single = !!on;
+    grid.classList.toggle("single-after", single);
+    if (beforePane) beforePane.hidden = single;
+    if (afterPane) afterPane.hidden = false;
+  };
+
+  beforeEl.onscroll = null;
+  afterEl.onscroll = null;
+
+  const file = _applyDiffState.filtered.find((f) => f.path === _applyDiffState.selectedPath) || null;
+  if (!file) {
+    setSingleAfterMode(false);
+    beforeEl.innerHTML = "";
+    afterEl.innerHTML = "";
+    fallback.hidden = false;
+    fallback.textContent = "No file selected.";
+    pathLine.textContent = "(no file selected)";
+    metaLine.textContent = "";
+    return;
+  }
+
+  pathLine.textContent = file.path;
+  const beforeSrc = file.beforeSource ? ` before:${file.beforeSource}` : "";
+  const afterSrc = file.afterSource ? ` after:${file.afterSource}` : "";
+  metaLine.textContent = `${file.action} | before=${file.beforeText.length} chars | after=${file.afterText.length} chars${beforeSrc}${afterSrc}`;
+
+  const isNewFile = _isLikelyNewFilePreview(file);
+  setSingleAfterMode(isNewFile);
+
+  const rows = _buildRowsForPreviewFile(file);
+  if (rows.length) {
+    _renderDiffColumn(beforeEl, rows, "left");
+    _renderDiffColumn(afterEl, rows, "right");
+    fallback.hidden = true;
+    fallback.textContent = "";
+    if (!isNewFile) _syncDiffScroll(beforeEl, afterEl);
+    return;
+  }
+
+  beforeEl.innerHTML = "";
+  afterEl.innerHTML = "";
+  fallback.hidden = false;
+  fallback.textContent =
+    file.diffText ||
+    "(No structured diff available for this file. Use Refresh Preview to re-read report/summary.)";
+}
+
+function _renderApplyDiffModal() {
+  const preview = _applyDiffState.preview || {};
+  const summary = el("applyDiffSummaryLine");
+  if (summary) {
+    const status = preview.ok ? "Preview OK" : "Preview blocked";
+    summary.textContent =
+      `${status} | files=${_applyDiffState.files.length} | errors=${preview.errorsCount ?? 0} | rejects=${
+        preview.rejectsCount ?? 0
+      }` + (preview.exitCode !== undefined ? ` | exit=${preview.exitCode}` : "");
+  }
+
+  _renderApplyDiffFileList();
+  _renderApplyDiffViewer();
+  _setApplyDiffBusy(_applyDiffState.busy);
+}
+
+function _openApplyDiffModal(preview) {
+  _applyDiffState.preview = preview || null;
+  _applyDiffState.files = _normalizePreviewFiles(preview);
+  _applyDiffState.filtered = _applyDiffState.files.slice();
+  _applyDiffState.selectedPath = _applyDiffState.files[0]?.path || "";
+  const search = el("applyDiffSearch");
+  if (search) search.value = "";
+  _setApplyDiffOpen(true);
+  _setApplyDiffBusy(false);
+  _renderApplyDiffModal();
+  try {
+    el("applyDiffSearch")?.focus();
+  } catch {}
+}
+
+function _closeApplyDiffModal() {
+  _setApplyDiffOpen(false);
+}
+
+async function _invokeApplyPreview(sourceTag) {
+  const tag = sourceTag || "preview";
+  const nonce = ++_applyDiffPreviewNonce;
+  setPatchBusy(true, "plan");
+  _applyDiffState.busy = true;
+  _renderApplyDiffModal();
+  addLog(`[APPLY_PREVIEW] start (${tag})`);
+
+  let preview = null;
+  try {
+    preview = await ipcRenderer.invoke("patch:previewApply", { pipelinePath: currentPipelinePath });
+  } catch (e) {
+    if (nonce !== _applyDiffPreviewNonce) return null;
+    addLog(`[APPLY_PREVIEW] invoke error: ${e?.message || e}`);
+    showToast("Apply preview failed.", { type: "error", ttl: 3600 });
+    setPatchBusy(false);
+    _applyDiffState.busy = false;
+    _renderApplyDiffModal();
+    return null;
+  }
+
+  if (nonce !== _applyDiffPreviewNonce) return null;
+  _logApplyPreviewSummary(preview);
+  setPatchBusy(false);
+  _applyDiffState.busy = false;
+  return preview;
+}
+
+async function _runPreviewAndOpenDiffModal(sourceTag) {
+  showToast("Previewing changes before Apply...", { type: "info", ttl: 1800 });
+  const preview = await _invokeApplyPreview(sourceTag || "run-apply");
+  if (!preview) return;
+
+  _openApplyDiffModal(preview);
+
+  if (!preview.ok) {
+    const reason = preview?.error || `exit=${preview?.exitCode ?? "?"}`;
+    addLog(`[APPLY_PREVIEW] blocked: ${reason}`);
+    showToast("Apply blocked: preview reported issues.", { type: "error", ttl: 4200 });
+    return;
+  }
+
+  showToast(`Preview ready: ${_applyDiffState.files.length} potential change(s).`, {
+    type: "warn",
+    ttl: 2800,
+  });
+}
+
+async function _refreshPreviewInDiffModal() {
+  if (!_applyDiffState.open || _applyDiffState.busy) return;
+  showToast("Refreshing preview...", { type: "info", ttl: 1400 });
+  const preview = await _invokeApplyPreview("refresh");
+  if (!preview) return;
+
+  _applyDiffState.preview = preview;
+  _applyDiffState.files = _normalizePreviewFiles(preview);
+  _applyDiffState.filtered = _applyDiffState.files.slice();
+  if (!_applyDiffState.files.some((f) => f.path === _applyDiffState.selectedPath)) {
+    _applyDiffState.selectedPath = _applyDiffState.files[0]?.path || "";
+  }
+  _renderApplyDiffModal();
+  if (preview.ok) showToast("Preview refreshed.", { type: "success", ttl: 1600 });
+  else showToast("Preview refreshed with issues.", { type: "warn", ttl: 2200 });
+}
+
+async function _confirmApplyFromDiffModal() {
+  if (_applyDiffState.busy) return;
+  const preview = _applyDiffState.preview;
+  if (!preview || !preview.ok) {
+    showToast("Apply is blocked until preview is valid.", { type: "error", ttl: 3200 });
+    return;
+  }
+
+  addLog("[APPLY_PREVIEW] apply confirmed by user");
+  _closeApplyDiffModal();
+  setPatchBusy(true, "apply");
+  showToast("Running Apply...", { type: "info", ttl: 1600 });
+  try {
+    await ipcRenderer.invoke("patch:runPipeline", { mode: "apply", pipelinePath: currentPipelinePath });
+  } catch (e) {
+    setPatchBusy(false);
+    throw e;
+  }
+}
+
 function bind() {
   setTabs();
+  _bindFileListVirtualEvents();
 
   el("btnOpen").addEventListener("click", async () => {
     await ipcRenderer.invoke("project:open");
@@ -1095,15 +1902,26 @@ function bind() {
   });
 
   el("btnRunApply").addEventListener("click", async () => {
-    setPatchBusy(true, "apply");
+    await _runPreviewAndOpenDiffModal("run-apply");
+  });
 
-    showToast("Running Apply…", { type: "info", ttl: 1600 });
-    try {
-  await ipcRenderer.invoke("patch:runPipeline", { mode: "apply", pipelinePath: currentPipelinePath });
-} catch (e) {
-  setPatchBusy(false);
-  throw e;
-}
+  el("btnApplyDiffRefresh")?.addEventListener("click", async () => {
+    await _refreshPreviewInDiffModal();
+  });
+
+  el("btnApplyDiffCancel")?.addEventListener("click", () => {
+    addLog("[APPLY_PREVIEW] apply canceled by user");
+    _closeApplyDiffModal();
+    showToast("Apply canceled.", { type: "warn", ttl: 2000 });
+  });
+
+  el("btnApplyDiffRunApply")?.addEventListener("click", async () => {
+    await _confirmApplyFromDiffModal();
+  });
+
+  el("applyDiffSearch")?.addEventListener("input", () => {
+    _renderApplyDiffFileList();
+    _renderApplyDiffViewer();
   });
 
   el("btnStopPatch").addEventListener("click", async () => {
@@ -1116,6 +1934,15 @@ function bind() {
   // - otherwise: close topmost card
   window.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+
+    if (_applyDiffState.open) {
+      e.preventDefault();
+      e.stopPropagation();
+      addLog("[APPLY_PREVIEW] preview closed via ESC");
+      _closeApplyDiffModal();
+      return;
+    }
+
     const layer = fvLayer();
     if (!layer) return;
 

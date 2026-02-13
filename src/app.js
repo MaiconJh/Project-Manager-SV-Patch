@@ -316,6 +316,591 @@ function buildPatchCommand({ runnerPath, manifest, projectPath, pipelinePath, mo
   return { cmd, args, reportPath };
 }
 
+function toProjectRel(projectPath, anyPath) {
+  const raw = String(anyPath || "").trim();
+  if (!raw) return "";
+
+  try {
+    const abs = path.isAbsolute(raw) ? raw : path.resolve(projectPath || process.cwd(), raw);
+    if (projectPath) {
+      const rel = path.relative(path.resolve(projectPath), abs);
+      if (rel && !rel.startsWith("..")) return posixRel(rel);
+    }
+    return posixRel(raw);
+  } catch {
+    return posixRel(raw);
+  }
+}
+
+function safeReadJsonIfExists(filePath) {
+  try {
+    if (!filePath) return null;
+    if (!fs.existsSync(filePath)) return null;
+    const raw = fs.readFileSync(filePath, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function collectPreviewChanges(report, projectPath) {
+  const out = [];
+  const seen = new Set();
+
+  const push = (p, action) => {
+    const rel = toProjectRel(projectPath, p);
+    if (!rel || rel === ".") return;
+    const act = String(action || "change");
+    const key = `${rel}|${act}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ path: rel, action: act });
+  };
+
+  const collectArray = (arr, fallbackAction) => {
+    if (!Array.isArray(arr)) return;
+    for (const item of arr) {
+      if (typeof item === "string") {
+        push(item, fallbackAction);
+        continue;
+      }
+      if (!item || typeof item !== "object") continue;
+
+      const p =
+        item.path ||
+        item.file ||
+        item.file_path ||
+        item.rel_path ||
+        item.rel ||
+        item.target ||
+        item.output;
+
+      const action = item.action || item.op || item.kind || item.type || fallbackAction || "change";
+      if (typeof p === "string" && p.trim()) push(p, action);
+
+      if (Array.isArray(item.files)) collectArray(item.files, action);
+      if (Array.isArray(item.changes)) collectArray(item.changes, action);
+    }
+  };
+
+  collectArray(report?.scans, "change");
+  collectArray(report?.changes, "change");
+  collectArray(report?.files, "change");
+  collectArray(report?.modified, "modify");
+  collectArray(report?.created, "create");
+  collectArray(report?.deleted, "delete");
+  collectArray(report?.summary?.files_changed, "change");
+
+  return out;
+}
+
+const PREVIEW_MAX_FILES = 5000;
+const PREVIEW_MAX_TEXT_CHARS = 180000;
+const PREVIEW_MAX_FILE_BYTES = 700 * 1024;
+const PREVIEW_SUMMARY_PARSE_MAX_CHARS = 2000000;
+
+function normalizePreviewAction(action) {
+  const a = String(action || "").toLowerCase();
+  if (a.includes("create") || a.includes("add") || a.includes("new")) return "ADD";
+  if (a.includes("delete") || a.includes("remove")) return "DEL";
+  if (a.includes("modify") || a.includes("update") || a.includes("change") || a.includes("patch")) return "MOD";
+  return "MOD";
+}
+
+function clipPreviewText(text, maxChars = PREVIEW_MAX_TEXT_CHARS) {
+  const s = String(text || "");
+  if (!s) return "";
+  if (s.length <= maxChars) return s;
+  return s.slice(0, maxChars) + "\n...(truncated)...";
+}
+
+function pickStringField(obj, names) {
+  if (!obj || typeof obj !== "object") return "";
+  for (const n of names) {
+    const v = obj[n];
+    if (typeof v === "string" && v.length) return v;
+    if (v && typeof v === "object") {
+      if (typeof v.text === "string" && v.text.length) return v.text;
+      if (typeof v.content === "string" && v.content.length) return v.content;
+      if (typeof v.value === "string" && v.value.length) return v.value;
+      if (typeof v.body === "string" && v.body.length) return v.body;
+    }
+  }
+  return "";
+}
+
+function looksLikePathToken(s) {
+  const t = String(s || "").trim();
+  if (!t) return false;
+  if (t.includes("/") || t.includes("\\")) return true;
+  if (/\.[a-z0-9]{1,10}$/i.test(t)) return true;
+  return false;
+}
+
+function cleanPathCandidate(raw) {
+  let s = String(raw || "").trim();
+  if (!s) return "";
+  s = s.replaceAll("`", "");
+  s = s.replace(/^['"]+|['"]+$/g, "");
+  s = s.replace(/^\s*(?:Root|Path|File)\s*:\s*/i, "");
+  s = s.replace(/\s+\((?:NEW|ADD|MOD|DEL|CHANGE|CHG)\)\s*$/i, "");
+  s = s.replace(/^a\//, "").replace(/^b\//, "");
+  return s.trim();
+}
+
+function isLikelyFilePathCandidate(raw, projectPath) {
+  const s = cleanPathCandidate(raw);
+  if (!s) return false;
+  if (s.length > 320) return false;
+  if (/^(?:root|plan only|strict|backup|rollback|duration|status)\s*:/i.test(String(raw || "").trim())) return false;
+  if (/^[a-z]+:\/\//i.test(s)) return false;
+  if (/[<>`$;{}|]/.test(s)) return false;
+  if (/[?#]/.test(s)) return false;
+  if (/\b(?:const|let|var|function|return|if|for|while)\b/.test(s)) return false;
+  if (!looksLikePathToken(s)) return false;
+
+  const rel = toProjectRel(projectPath, s);
+  if (!rel || rel === ".") return false;
+  if (rel.startsWith("../")) return false;
+  if (/^[a-z]:$/i.test(rel)) return false;
+  if (/\s{2,}/.test(rel)) return false;
+  if (/[()]/.test(rel) && !rel.includes("/")) return false;
+  return true;
+}
+
+function readProjectTextIfExists(projectPath, relPath) {
+  try {
+    if (!projectPath || !relPath) return "";
+    const abs = path.resolve(projectPath, relPath);
+    if (!fs.existsSync(abs)) return "";
+    const st = fs.statSync(abs);
+    if (!st || !st.isFile()) return "";
+    if (st.size > PREVIEW_MAX_FILE_BYTES) return "";
+    return clipPreviewText(fs.readFileSync(abs, "utf-8"));
+  } catch {
+    return "";
+  }
+}
+
+function collectPreviewDetails(report, projectPath) {
+  const map = new Map();
+
+  const put = (p, action, beforeText, afterText, diffText, opts = {}) => {
+    const rel = toProjectRel(projectPath, p);
+    if (!rel || rel === ".") return;
+    const key = rel;
+    const curr = map.get(key) || {
+      path: rel,
+      action: normalizePreviewAction(action),
+      beforeText: "",
+      afterText: "",
+      diffText: "",
+      hasBefore: false,
+      hasAfter: false,
+      beforeSource: "",
+      afterSource: "",
+    };
+
+    if (action) curr.action = normalizePreviewAction(action);
+    if (!curr.beforeText && beforeText) {
+      curr.beforeText = clipPreviewText(beforeText);
+      curr.hasBefore = true;
+      curr.beforeSource = opts.beforeSource || "report";
+    }
+    if (!curr.afterText && afterText) {
+      curr.afterText = clipPreviewText(afterText);
+      curr.hasAfter = true;
+      curr.afterSource = opts.afterSource || "report";
+    }
+    if (!curr.diffText && diffText) curr.diffText = clipPreviewText(diffText);
+    map.set(key, curr);
+  };
+
+  const findPathCandidate = (obj) => {
+    if (!obj || typeof obj !== "object") return "";
+
+    const direct =
+      obj.path ||
+      obj.file ||
+      obj.file_path ||
+      obj.rel_path ||
+      obj.rel ||
+      obj.target ||
+      obj.output ||
+      obj.dst ||
+      obj.dest ||
+      obj.to ||
+      obj.from;
+    if (typeof direct === "string" && direct.trim()) return cleanPathCandidate(direct);
+
+    for (const [k, v] of Object.entries(obj)) {
+      const key = String(k || "").toLowerCase();
+      if (!/(path|file|target|output|dest|dst|rel|to|from)/.test(key)) continue;
+      if (typeof v === "string" && v.trim() && isLikelyFilePathCandidate(v, projectPath)) {
+        return cleanPathCandidate(v);
+      }
+    }
+
+    return "";
+  };
+
+  const findActionCandidate = (obj, fallbackAction) => {
+    if (!obj || typeof obj !== "object") return fallbackAction || "change";
+    return obj.action || obj.op || obj.kind || obj.type || obj.change_type || fallbackAction || "change";
+  };
+
+  const collectNode = (node, fallbackAction, depth, seen, allowStringPaths = false) => {
+    if (depth > 16) return;
+    if (node === null || node === undefined) return;
+
+    if (typeof node === "string") {
+      if (allowStringPaths && isLikelyFilePathCandidate(node, projectPath)) {
+        put(cleanPathCandidate(node), fallbackAction, "", "", "");
+      }
+      return;
+    }
+
+    if (Array.isArray(node)) {
+      for (const item of node) collectNode(item, fallbackAction, depth + 1, seen, allowStringPaths);
+      return;
+    }
+
+    if (typeof node !== "object") return;
+    if (seen.has(node)) return;
+    seen.add(node);
+
+    const obj = node;
+    const p = findPathCandidate(obj);
+    const action = findActionCandidate(obj, fallbackAction);
+
+    const beforeText = pickStringField(obj, [
+      "beforeText",
+      "before_text",
+      "before",
+      "oldText",
+      "old_text",
+      "old",
+      "original",
+      "previous",
+      "prev",
+      "source_text",
+      "input_text",
+    ]);
+    const afterText = pickStringField(obj, [
+      "afterText",
+      "after_text",
+      "after",
+      "newText",
+      "new_text",
+      "new",
+      "result",
+      "updated",
+      "output_text",
+      "final_text",
+    ]);
+    const diffText = pickStringField(obj, [
+      "diffText",
+      "diff_text",
+      "diff",
+      "patch",
+      "unified_diff",
+      "unidiff",
+      "changes_text",
+    ]);
+
+    if (typeof p === "string" && p.trim() && isLikelyFilePathCandidate(p, projectPath)) {
+      put(cleanPathCandidate(p), action, beforeText, afterText, diffText);
+    }
+
+    for (const [k, v] of Object.entries(obj)) {
+      const key = String(k || "").toLowerCase();
+      const nextAllowStrings = /(files?|paths?|changes?|modified|created|deleted|outputs?|results?|hits)/.test(key);
+      if (v && (typeof v === "object" || Array.isArray(v))) {
+        collectNode(v, action, depth + 1, seen, nextAllowStrings);
+      }
+    }
+  };
+
+  const seen = new Set();
+  collectNode(report?.steps, "change", 0, seen, false);
+  collectNode(report?.scans, "change", 0, seen, false);
+  collectNode(report?.changes, "change", 0, seen, true);
+  collectNode(report?.files, "change", 0, seen, true);
+  collectNode(report?.modified, "modify", 0, seen, true);
+  collectNode(report?.created, "create", 0, seen, true);
+  collectNode(report?.deleted, "delete", 0, seen, true);
+  collectNode(report?.summary?.files_changed, "change", 0, seen, true);
+  for (const [k, v] of Object.entries(report || {})) {
+    const key = String(k || "").toLowerCase();
+    if (!/(change|scan|file|result|output|patch|diff|write|apply|modified|created|deleted)/.test(key)) continue;
+    collectNode(v, "change", 0, seen, /(files?|paths?|changes?)/.test(key));
+  }
+
+  return map;
+}
+
+function collectSummaryDiffsByPath(summaryText, projectPath) {
+  const map = new Map();
+  const raw = String(summaryText || "").replace(/\r\n/g, "\n");
+  if (!raw) return map;
+
+  const add = (p, diffText) => {
+    if (!isLikelyFilePathCandidate(p, projectPath)) return;
+    const rel = toProjectRel(projectPath, cleanPathCandidate(p));
+    if (!rel || rel === "." || !diffText) return;
+    if (!map.has(rel)) map.set(rel, clipPreviewText(diffText));
+  };
+
+  // unified diff sections: diff --git a/... b/...
+  const blockRe = /(^|\n)(diff --git a\/([^\n]+) b\/([^\n]+)\n[\s\S]*?)(?=\ndiff --git a\/|\n*$)/g;
+  let m;
+  while ((m = blockRe.exec(raw))) {
+    const pA = cleanPathCandidate(String(m[3] || "").trim());
+    const pB = cleanPathCandidate(String(m[4] || "").trim());
+    add(pB || pA, String(m[2] || "").trim());
+  }
+
+  // markdown fenced diff blocks tied to nearest path-like heading/list/path line
+  const lines = raw.split("\n");
+  let currentPath = "";
+  let inDiffFence = false;
+  let buff = [];
+
+  for (const line of lines) {
+    if (!inDiffFence) {
+      let maybe = "";
+      const h = line.match(/^#{1,6}\s+(.+)$/);
+      if (h) maybe = h[1];
+      const b = line.match(/^\s*[-*]\s+`?(.+?)`?\s*$/);
+      if (!maybe && b) maybe = b[1];
+      const p = line.match(/^\s*(?:file|path)\s*:\s*(.+?)\s*$/i);
+      if (!maybe && p) maybe = p[1];
+
+      if (maybe && isLikelyFilePathCandidate(maybe, projectPath)) {
+        currentPath = cleanPathCandidate(maybe);
+      }
+
+      if (/^\s*```diff\s*$/i.test(line)) {
+        inDiffFence = true;
+        buff = [];
+      }
+      continue;
+    }
+
+    if (/^\s*```\s*$/.test(line)) {
+      if (currentPath && buff.length) add(currentPath, buff.join("\n"));
+      inDiffFence = false;
+      buff = [];
+      continue;
+    }
+
+    buff.push(line);
+  }
+
+  return map;
+}
+
+function collectSummaryFileHints(summaryText, projectPath) {
+  const out = new Map();
+  const raw = String(summaryText || "").replace(/\r\n/g, "\n");
+  if (!raw) return out;
+
+  const add = (p, action = "MOD") => {
+    if (!isLikelyFilePathCandidate(p, projectPath)) return;
+    const rel = toProjectRel(projectPath, cleanPathCandidate(p));
+    if (!rel || rel === ".") return;
+    if (!out.has(rel)) out.set(rel, normalizePreviewAction(action));
+  };
+
+  const lines = raw.split("\n");
+  for (const line of lines) {
+    const h = line.match(/^#{1,6}\s+(.+)$/);
+    if (h) add(h[1]);
+
+    const b = line.match(/^\s*[-*]\s+`?(.+?)`?\s*$/);
+    if (b) add(b[1]);
+
+    const p = line.match(/^\s*(?:file|path)\s*:\s*(.+?)\s*$/i);
+    if (p) add(p[1]);
+
+    const d1 = line.match(/^---\s+(?:a\/)?(.+)$/);
+    if (d1) add(String(d1[1]).trim(), "DEL");
+    const d2 = line.match(/^\+\+\+\s+(?:b\/)?(.+)$/);
+    if (d2) add(String(d2[1]).trim(), "ADD");
+  }
+
+  return out;
+}
+
+function collectStepScriptFiles(report, projectPath) {
+  const out = [];
+  const steps = Array.isArray(report?.steps) ? report.steps : [];
+
+  for (const step of steps) {
+    const scripts = Array.isArray(step?.scripts) ? step.scripts : [];
+    for (const script of scripts) {
+      const files = Array.isArray(script?.files) ? script.files : [];
+      for (const f of files) {
+        const filePath = f?.file || f?.path || f?.rel_path || f?.target || "";
+        if (!isLikelyFilePathCandidate(filePath, projectPath)) continue;
+
+        const relPath = toProjectRel(projectPath, cleanPathCandidate(filePath));
+        const ops = Array.isArray(f?.ops) ? f.ops : [];
+        const changedByOps = ops.some((op) => Number(op?.changed || 0) > 0);
+        const changed = Boolean(f?.changed) || changedByOps;
+        const hasDiff = typeof f?.diff === "string" && f.diff.trim().length > 0;
+        const isNew = Boolean(f?.is_new) || Number(f?.bytes_before || 0) === 0;
+        if (!changed && !hasDiff && !isNew) continue;
+
+        out.push({
+          path: relPath,
+          action: isNew ? "ADD" : "MOD",
+          beforeText: "",
+          afterText: "",
+          diffText: hasDiff ? String(f.diff) : "",
+          hasBefore: false,
+          hasAfter: false,
+          beforeSource: "",
+          afterSource: "",
+          changeEvidence: true,
+        });
+      }
+    }
+  }
+
+  return out;
+}
+
+function buildPreviewFiles(report, projectPath, summaryText) {
+  const changes = collectPreviewChanges(report, projectPath);
+  const stepFiles = collectStepScriptFiles(report, projectPath);
+  const detailsMap = collectPreviewDetails(report, projectPath);
+  const summaryDiffMap = collectSummaryDiffsByPath(summaryText, projectPath);
+  const summaryHints = collectSummaryFileHints(summaryText, projectPath);
+  const outMap = new Map();
+
+  const merge = (entry) => {
+    if (!entry || !entry.path) return;
+    const key = entry.path;
+    const prev = outMap.get(key) || {
+      path: key,
+      action: "MOD",
+      beforeText: "",
+      afterText: "",
+      diffText: "",
+      hasBefore: false,
+      hasAfter: false,
+      beforeSource: "",
+      afterSource: "",
+      changeEvidence: false,
+    };
+    const nextAction = normalizePreviewAction(entry.action || prev.action);
+    // Never downgrade ADD/DEL into MOD when other collectors bring generic "change".
+    if (prev.action === "ADD" || prev.action === "DEL") {
+      // keep strongest existing action
+    } else if (nextAction === "ADD" || nextAction === "DEL") {
+      prev.action = nextAction;
+    } else {
+      prev.action = nextAction;
+    }
+    if (!prev.beforeText && entry.beforeText) prev.beforeText = clipPreviewText(entry.beforeText);
+    if (!prev.afterText && entry.afterText) prev.afterText = clipPreviewText(entry.afterText);
+    if (!prev.diffText && entry.diffText) prev.diffText = clipPreviewText(entry.diffText);
+    prev.hasBefore = Boolean(prev.hasBefore || entry.hasBefore || Boolean(entry.beforeText));
+    prev.hasAfter = Boolean(prev.hasAfter || entry.hasAfter || Boolean(entry.afterText));
+    if (!prev.beforeSource && entry.beforeSource) prev.beforeSource = String(entry.beforeSource);
+    if (!prev.afterSource && entry.afterSource) prev.afterSource = String(entry.afterSource);
+    prev.changeEvidence = Boolean(
+      prev.changeEvidence ||
+        entry.changeEvidence ||
+        Boolean(entry.diffText) ||
+        Boolean(entry.afterText) ||
+        Boolean(entry.beforeText)
+    );
+    outMap.set(key, prev);
+  };
+
+  for (const sf of stepFiles) merge(sf);
+
+  for (const c of changes) {
+    merge({
+      path: String(c.path || ""),
+      action: c.action,
+      beforeText: "",
+      afterText: "",
+      diffText: "",
+    });
+  }
+
+  for (const d of detailsMap.values()) merge(d);
+
+  for (const [p, diffText] of summaryDiffMap.entries()) {
+    merge({ path: p, action: "MOD", diffText });
+  }
+  for (const [p, action] of summaryHints.entries()) {
+    merge({ path: p, action });
+  }
+
+  const files = Array.from(outMap.values())
+    .filter((f) => Boolean(f.changeEvidence || f.diffText || f.afterText || f.action === "ADD" || f.action === "DEL"))
+    .sort((a, b) => a.path.localeCompare(b.path));
+
+  // Disk fallback only where it is semantically safe (DEL or MOD with known after side).
+  for (const f of files) {
+    const canUseBeforeDisk =
+      !f.beforeText && (f.action === "DEL" || (f.action === "MOD" && Boolean(f.afterText) && Boolean(f.hasAfter)));
+    if (canUseBeforeDisk) {
+      const before = readProjectTextIfExists(projectPath, f.path);
+      if (before) {
+        f.beforeText = before;
+        if (!f.beforeSource) f.beforeSource = "disk";
+      }
+    }
+  }
+
+  // fallback: one-file report with no per-file diff -> attach summary text as textual diff
+  if (files.length === 1 && !files[0].diffText && summaryText) {
+    files[0].diffText = clipPreviewText(summaryText);
+  }
+
+  return files.slice(0, PREVIEW_MAX_FILES).map((f) => ({
+    path: f.path,
+    action: normalizePreviewAction(f.action),
+    beforeText: f.beforeText || "",
+    afterText: f.afterText || "",
+    diffText: f.diffText || "",
+    hasBefore: Boolean(f.hasBefore || f.beforeText),
+    hasAfter: Boolean(f.hasAfter || f.afterText),
+    beforeSource: f.beforeSource || "",
+    afterSource: f.afterSource || "",
+  }));
+}
+
+function readSummaryExcerpt(summaryPath) {
+  try {
+    if (!summaryPath) return "";
+    if (!fs.existsSync(summaryPath)) return "";
+    const raw = fs.readFileSync(summaryPath, "utf-8");
+    const MAX_CHARS = 120000;
+    if (raw.length <= MAX_CHARS) return raw;
+    return raw.slice(0, MAX_CHARS) + "\n...(truncated)...";
+  } catch {
+    return "";
+  }
+}
+
+function readSummaryForParse(summaryPath) {
+  try {
+    if (!summaryPath) return "";
+    if (!fs.existsSync(summaryPath)) return "";
+    const raw = fs.readFileSync(summaryPath, "utf-8");
+    if (raw.length <= PREVIEW_SUMMARY_PARSE_MAX_CHARS) return raw;
+    return raw.slice(0, PREVIEW_SUMMARY_PARSE_MAX_CHARS);
+  } catch {
+    return "";
+  }
+}
+
 // ─────────────────────────────────────────────
 // UI bootstrap
 ipcMain.handle("ui:refresh", async () => {
@@ -753,9 +1338,152 @@ ipcMain.handle("patch:savePipeline", async (_, payload) => {
   return outPath;
 });
 
+// Patch: preview apply (runs plan + summarizes report before confirm)
+ipcMain.handle("patch:previewApply", async (_, payload) => {
+  if (!ensureProjectOpen()) return { ok: false, error: "No project open." };
+
+  if (patchProc) {
+    log("WARNING", "A patch process is already running. Stop it before preview.");
+    return { ok: false, error: "Patch already running." };
+  }
+
+  const pipelinePath = String(payload?.pipelinePath || "").trim();
+  if (!pipelinePath) {
+    log("ERROR", "Pipeline path vazio (salve o pipeline antes).");
+    return { ok: false, error: "Pipeline path vazio." };
+  }
+  if (!fs.existsSync(pipelinePath)) {
+    log("ERROR", `Pipeline does not exist: ${pipelinePath}`);
+    return { ok: false, error: "Pipeline does not exist." };
+  }
+
+  if (!state.patch.runnerPath) {
+    log("ERROR", "Runner is not selected. Use 'Pick runner'.");
+    return { ok: false, error: "Runner not selected." };
+  }
+  if (!fs.existsSync(state.patch.runnerPath)) {
+    log("ERROR", `Runner does not exist: ${state.patch.runnerPath}`);
+    return { ok: false, error: "Runner does not exist." };
+  }
+  if (!state.patch.manifest) {
+    log("ERROR", "Manifest is not loaded. Put sv_patch.manifest.json next to runner and click 'Reload'.");
+    return { ok: false, error: "Manifest not loaded." };
+  }
+
+  let cmd, args, reportPath;
+  try {
+    ({ cmd, args, reportPath } = buildPatchCommand({
+      runnerPath: state.patch.runnerPath,
+      manifest: state.patch.manifest,
+      projectPath: state.projectPath,
+      pipelinePath,
+      mode: "plan",
+    }));
+  } catch (e) {
+    const err = e?.message || String(e);
+    log("ERROR", `Failed to build preview command: ${err}`);
+    return { ok: false, error: err };
+  }
+
+  log(
+    "SYSTEM",
+    `Apply preview (plan): ${cmd} ${args.map((a) => (String(a).includes(" ") ? `"${a}"` : a)).join(" ")}`
+  );
+  log("INFO", `Preview report: ${reportPath}`);
+  push({ status: "Previewing apply changes..." });
+
+  const runRes = await new Promise((resolve) => {
+    let spawnFailed = false;
+
+    try {
+      patchProc = spawn(cmd, args, {
+        cwd: state.projectPath,
+        windowsHide: true,
+        shell: false,
+      });
+    } catch (e) {
+      spawnFailed = true;
+      const err = e?.message || String(e);
+      patchProc = null;
+      resolve({ exitCode: -1, spawnError: err });
+    }
+
+    if (spawnFailed || !patchProc) return;
+
+    patchProc.stdout.on("data", (buf) => {
+      for (const line of splitLinesChunked(buf.toString("utf-8"))) {
+        if (line.length) log("PATCH", `[PREVIEW] ${line}`);
+      }
+    });
+    patchProc.stderr.on("data", (buf) => {
+      for (const line of splitLinesChunked(buf.toString("utf-8"))) {
+        if (line.length) log("PATCH_ERR", `[PREVIEW] ${line}`);
+      }
+    });
+
+    patchProc.on("close", (code, signal) => {
+      patchProc = null;
+      const normalizedCode = Number.isInteger(code) ? Number(code) : -1;
+      resolve({ exitCode: normalizedCode, signal: signal || "" });
+    });
+
+    patchProc.on("error", (err) => {
+      patchProc = null;
+      resolve({ exitCode: -1, spawnError: err?.message || String(err) });
+    });
+  });
+
+  if (runRes.spawnError) {
+    log("ERROR", `Falha no preview: ${runRes.spawnError}`);
+    push({ status: "Ready." });
+    return { ok: false, error: runRes.spawnError };
+  }
+
+  log("SYSTEM", `Preview finished (code=${runRes.exitCode})`);
+
+  const report = safeReadJsonIfExists(reportPath);
+  const errors = Array.isArray(report?.errors) ? report.errors : [];
+  const rejects = Array.isArray(report?.rejects) ? report.rejects : [];
+
+  const summaryPathRaw = report?.summary_path ? String(report.summary_path) : "";
+  const summaryPath = summaryPathRaw ? path.resolve(summaryPathRaw) : "";
+  const summaryExcerpt = readSummaryExcerpt(summaryPath);
+  const summaryForParse = readSummaryForParse(summaryPath);
+  const files = buildPreviewFiles(report, state.projectPath, summaryForParse || summaryExcerpt);
+  const changes = files.map((f) => ({ path: f.path, action: f.action }));
+
+  const ok = runRes.exitCode === 0 && !runRes.signal && errors.length === 0;
+  if (!ok) {
+    log(
+      "WARNING",
+      `Preview indicates risk (exit=${runRes.exitCode}, signal=${runRes.signal || "-"}, errors=${errors.length}, rejects=${rejects.length}).`
+    );
+  } else {
+    log("SUCCESS", `Preview ready: ${files.length} potential change(s).`);
+  }
+
+  push({ status: "Ready." });
+
+  return {
+    ok,
+    exitCode: runRes.exitCode,
+    signal: runRes.signal || "",
+    reportPath,
+    summaryPath: summaryPath || null,
+    summaryExcerpt,
+    durationMs: Number(report?.duration_ms || 0),
+    errorsCount: errors.length,
+    rejectsCount: rejects.length,
+    changesCount: files.length,
+    changes: changes.slice(0, 200),
+    files,
+    error: !ok ? (errors[0]?.error || errors[0]?.message || "Preview returned issues.") : "",
+  };
+});
+
 // Patch: run pipeline (plan/apply) using manifest
 ipcMain.handle("patch:runPipeline", async (_, payload) => {
-  if (!ensureProjectOpen()) return;
+  if (!ensureProjectOpen()) return { ok: false, error: "project_not_open" };
 
   if (patchProc) {
     log("WARNING", "Já existe um patch rodando. Pare antes de iniciar outro.");

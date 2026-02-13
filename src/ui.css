@@ -1782,7 +1782,8 @@ body.has-apply-diff .applyDiffModal{
 
 /* keep text visible while find bar overlays top-right */
 .fvEditWrap.find-open .fvEditor,
-.fvEditWrap.find-open .fvGutter pre{
+.fvEditWrap.find-open .fvGutter pre,
+.fvEditWrap.find-open .fvFindOverlay{
   padding-top:40px;
 }
 
@@ -1823,4 +1824,51 @@ body.has-apply-diff .applyDiffModal{
 
 .fvCard[data-find-open="0"] .fvFindBar{
   pointer-events:none;
+}
+
+/* IDE-like find overlay inside textarea stack (non-destructive) */
+.fvEditorStack{
+  position:relative;
+  flex:1 1 auto;
+  min-width:0;
+  min-height:0;
+}
+
+.fvEditorStack .fvEditor{
+  position:relative;
+  z-index:2;
+  background:transparent;
+}
+
+.fvFindOverlay{
+  position:absolute;
+  inset:0;
+  z-index:1;
+  margin:0;
+  padding:12px 14px;
+  overflow:hidden;
+  pointer-events:none;
+  font-family:var(--mono);
+  font-size:12.5px;
+  line-height:1.45;
+  white-space:pre;
+  color:transparent;
+}
+
+.fvFindOverlay code{
+  font-family:inherit;
+  font-size:inherit;
+  line-height:inherit;
+  color:transparent;
+  white-space:inherit;
+}
+
+.findMatch{
+  background:rgba(187,128,9,.22);
+  color:transparent;
+  border-radius:2px;
+}
+
+.findMatchActive{
+  background:rgba(56,139,253,.42);
 }

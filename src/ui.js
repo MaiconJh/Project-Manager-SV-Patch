@@ -434,6 +434,9 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   let mdRaw = false;
   let _lineNumberTimer = null;
   let _findOpen = false;
+  let _findMatches = [];
+  let _findIndex = -1;
+  let _findDebounceTimer = null;
 
   const isMd = isMarkdownExt(ext);
 
@@ -489,52 +492,152 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     const editWrap = cardEl?.querySelector("[data-edit-wrap]");
     const editor = cardEl?.querySelector("[data-editor]");
     const findStatus = cardEl?.querySelector("[data-find-status]");
+    const overlay = cardEl?.querySelector("[data-find-overlay]");
+    const overlayContent = cardEl?.querySelector("[data-find-overlay-content]");
+    if (_findDebounceTimer) clearTimeout(_findDebounceTimer);
     _findOpen = false;
+    _findMatches = [];
+    _findIndex = -1;
     if (cardEl) cardEl.dataset.findOpen = "0";
     if (findBar) findBar.hidden = true;
     if (editWrap) editWrap.classList.remove("find-open");
+    if (overlay) {
+      overlay.hidden = true;
+      overlay.scrollTop = 0;
+      overlay.scrollLeft = 0;
+    }
+    if (overlayContent) overlayContent.innerHTML = "";
     if (findStatus) findStatus.textContent = "";
     if (focusEditor && editor) editor.focus();
   }
 
-  function _findInEditor(cardEl, direction) {
+  function _escapeRegExp(s) {
+    return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function _escapeHtmlLite(s) {
+    return String(s)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
+  }
+
+  function _syncFindStatus(cardEl) {
+    const status = cardEl?.querySelector("[data-find-status]");
+    if (!status) return;
+    if (!_findOpen) {
+      status.textContent = "";
+      return;
+    }
+    const total = _findMatches.length;
+    if (!total) {
+      status.textContent = "0 of 0";
+      return;
+    }
+    status.textContent = `${_findIndex + 1} of ${total}`;
+  }
+
+  function _scrollFindOverlayWithEditor(cardEl) {
+    const editor = cardEl?.querySelector("[data-editor]");
+    const overlay = cardEl?.querySelector("[data-find-overlay]");
+    if (!editor || !overlay) return;
+    overlay.scrollTop = editor.scrollTop;
+    overlay.scrollLeft = editor.scrollLeft;
+  }
+
+  function _rebuildFindMatches(cardEl) {
     const editor = cardEl?.querySelector("[data-editor]");
     const findInput = cardEl?.querySelector("[data-find-input]");
-    const findStatus = cardEl?.querySelector("[data-find-status]");
-    if (!editor || !findInput) return false;
+    const overlay = cardEl?.querySelector("[data-find-overlay]");
+    const overlayContent = cardEl?.querySelector("[data-find-overlay-content]");
+    if (!editor || !findInput || !overlay || !overlayContent) return;
 
+    const text = String(editor.value || "");
     const needleRaw = String(findInput.value || "");
     const needle = needleRaw.toLowerCase();
-    const haystackRaw = String(editor.value || "");
-    const haystack = haystackRaw.toLowerCase();
 
-    if (!needle) {
-      if (findStatus) findStatus.textContent = "Type to search";
-      return false;
+    _findMatches = [];
+    _findIndex = -1;
+
+    if (!_findOpen || !needleRaw) {
+      overlay.hidden = true;
+      overlayContent.innerHTML = "";
+      _syncFindStatus(cardEl);
+      return;
     }
 
-    let idx = -1;
-    if (direction === "prev") {
-      const startPrev = Math.max(0, Number(editor.selectionStart || 0) - 1);
-      idx = haystack.lastIndexOf(needle, startPrev);
-      if (idx < 0) idx = haystack.lastIndexOf(needle);
-    } else {
-      const startNext = Math.max(0, Number(editor.selectionEnd || 0));
-      idx = haystack.indexOf(needle, startNext);
-      if (idx < 0) idx = haystack.indexOf(needle);
+    let idx = 0;
+    const hay = text.toLowerCase();
+    while (idx <= hay.length) {
+      const pos = hay.indexOf(needle, idx);
+      if (pos === -1) break;
+      _findMatches.push({ start: pos, end: pos + needleRaw.length });
+      idx = pos + Math.max(1, needleRaw.length);
     }
 
-    if (idx < 0) {
-      if (findStatus) findStatus.textContent = "No match";
-      return false;
+    if (!_findMatches.length) {
+      overlay.hidden = true;
+      overlayContent.innerHTML = "";
+      _syncFindStatus(cardEl);
+      return;
     }
 
-    const end = idx + needleRaw.length;
+    _findIndex = 0;
+    overlay.hidden = false;
+
+    const re = new RegExp(_escapeRegExp(needleRaw), "gi");
+    let activeCount = -1;
+    overlayContent.innerHTML = _escapeHtmlLite(text).replace(re, (m) => {
+      activeCount += 1;
+      const activeCls = activeCount === _findIndex ? " findMatchActive" : "";
+      return `<mark class="findMatch${activeCls}">${_escapeHtmlLite(m)}</mark>`;
+    });
+
+    const m0 = _findMatches[0];
     editor.focus();
-    editor.setSelectionRange(idx, end);
-    editor.scrollTop = editor.scrollTop;
-    if (findStatus) findStatus.textContent = "";
+    editor.setSelectionRange(m0.start, m0.end);
+    _scrollFindOverlayWithEditor(cardEl);
+    _syncFindStatus(cardEl);
+  }
+
+  function _scheduleFindRebuild(cardEl) {
+    if (_findDebounceTimer) clearTimeout(_findDebounceTimer);
+    _findDebounceTimer = setTimeout(() => _rebuildFindMatches(cardEl), 140);
+  }
+
+  function _selectFindMatchByIndex(cardEl, nextIndex) {
+    const editor = cardEl?.querySelector("[data-editor]");
+    const overlayContent = cardEl?.querySelector("[data-find-overlay-content]");
+    if (!editor || !_findMatches.length) {
+      _syncFindStatus(cardEl);
+      return false;
+    }
+
+    const total = _findMatches.length;
+    _findIndex = ((nextIndex % total) + total) % total;
+    const m = _findMatches[_findIndex];
+    editor.focus();
+    editor.setSelectionRange(m.start, m.end);
+
+    if (overlayContent) {
+      const marks = overlayContent.querySelectorAll("mark.findMatch");
+      marks.forEach((el, i) => el.classList.toggle("findMatchActive", i == _findIndex));
+    }
+
+    _scrollFindOverlayWithEditor(cardEl);
+    _syncFindStatus(cardEl);
     return true;
+  }
+
+  function _findInEditor(cardEl, direction) {
+    if (!_findOpen) return false;
+    if (!_findMatches.length) {
+      _scheduleFindRebuild(cardEl);
+      return false;
+    }
+    const step = direction === "prev" ? -1 : 1;
+    const start = _findIndex < 0 ? 0 : _findIndex;
+    return _selectFindMatchByIndex(cardEl, start + step);
   }
 
   function renderViewer() {
@@ -573,6 +676,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     const confirmBar = card.querySelector("[data-confirm]");
 
     card.dataset.editing = editing ? "1" : "0";
+    if (!card.dataset.findOpen) card.dataset.findOpen = "0";
     if (!editing && confirmBar) confirmBar.style.display = "none";
 
     if (btnClose) btnClose.style.display = editing ? "none" : "";
@@ -662,7 +766,10 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
         </div>
         <div class="fvEditMain">
           <div class="fvGutter" data-gutter="1" aria-hidden="true"><pre data-lines="1">1</pre></div>
-          <textarea class="fvEditor" data-editor="1" spellcheck="false" style="display:none"></textarea>
+          <div class="fvEditorStack" data-editor-stack="1">
+            <pre class="fvFindOverlay" data-find-overlay="1" hidden><code data-find-overlay-content="1"></code></pre>
+            <textarea class="fvEditor" data-editor="1" spellcheck="false" style="display:none"></textarea>
+          </div>
         </div>
       </div>
     </div>
@@ -824,11 +931,13 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     const editorEl = card.querySelector("[data-editor]");
     const gutterPre = card.querySelector("[data-lines]");
     scheduleLineNumbersRefresh(editorEl, gutterPre);
+    if (_findOpen) _scheduleFindRebuild(card);
   });
 
   card.querySelector("[data-editor]")?.addEventListener("scroll", (e) => {
     const gutter = card.querySelector("[data-gutter]");
     syncEditorGutterScroll(e.target, gutter);
+    _scrollFindOverlayWithEditor(card);
   });
 
   card.querySelector("[data-editor]")?.addEventListener("keydown", (e) => {
@@ -836,6 +945,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       e.preventDefault();
       if (!editing) return;
       openFindBar(card);
+      _scheduleFindRebuild(card);
       return;
     }
     if (String(e.key || "") === "Escape") {
@@ -872,6 +982,11 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       e.preventDefault();
       _findInEditor(card, e.shiftKey ? "prev" : "next");
     }
+  });
+
+  card.querySelector("[data-find-input]")?.addEventListener("input", () => {
+    if (!_findOpen) return;
+    _scheduleFindRebuild(card);
   });
 
   // expose cancel for global ESC handling

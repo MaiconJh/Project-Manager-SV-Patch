@@ -1,0 +1,11 @@
+{
+  "steps": [
+    {
+      "name": "execution-modes-contract",
+      "scripts": [
+        "tools/sv_patch/validation/scripts/execution_modes/plan_mode_no_persist_expected.rw",
+        "tools/sv_patch/validation/scripts/execution_modes/strict_noop_fail_expected.rw"
+      ]
+    }
+  ]
+}

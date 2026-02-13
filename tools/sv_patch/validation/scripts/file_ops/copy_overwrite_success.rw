@@ -1,0 +1,4 @@
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/source.txt | payload-v2
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/dest.txt | old
+COPY_FILE | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/source.txt | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/dest.txt | OVERWRITE=1
+ASSERT_REGEX | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/dest.txt | payload-v2

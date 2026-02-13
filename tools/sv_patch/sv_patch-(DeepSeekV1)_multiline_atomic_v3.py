@@ -1565,6 +1565,24 @@ def run_pipeline(
                         continue
 
                     overwrite = _opt_bool(cmd.opts, "OVERWRITE", False)
+                    if dst_rel == rel_file:
+                        if strict and not allow_noop:
+                            err = {
+                                "step": step_name,
+                                "script": sp,
+                                "file": rel_file,
+                                "line": cmd.line_no,
+                                "op": cmd.op,
+                                "error": "STRICT_FAIL_EXPECTED_CHANGE",
+                                "raw": cmd.raw,
+                            }
+                            script_entry["errors"].append(err)
+                            step_errors.append(err)
+                        op_record(0, to=dst_rel)
+                        if dst_rel in per_file_ops:
+                            per_file_ops[dst_rel]["ops"].append({"line": cmd.line_no, "op": cmd.op, "changed": 0, "from": rel_file})
+                        continue
+
                     if dst_rel != rel_file and dst_text is not None and not overwrite:
                         err = {
                             "step": step_name,

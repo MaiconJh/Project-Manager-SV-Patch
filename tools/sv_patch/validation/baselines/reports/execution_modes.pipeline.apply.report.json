@@ -1,0 +1,125 @@
+{
+  "root": "/workspace/Project-Manager-SV-Patch",
+  "plan_only": false,
+  "strict": true,
+  "backup": false,
+  "rollback_on_fail": false,
+  "workers": 8,
+  "limits": {
+    "max_files": 500,
+    "max_total_write_bytes": 10000000,
+    "allowlist_prefixes": [
+      "."
+    ]
+  },
+  "steps": [
+    {
+      "name": "execution-modes-contract",
+      "scripts": [
+        {
+          "script": "tools/sv_patch/validation/scripts/execution_modes/plan_mode_no_persist_expected.rw",
+          "files": [
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/execution_modes/tmp/plan_apply.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 1,
+                  "op": "UPSERT_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 2,
+                  "op": "ASSERT_FILE_EXISTS",
+                  "changed": 0
+                }
+              ],
+              "diff": "--- tools/sv_patch/validation/artifacts/workspaces/execution_modes/tmp/plan_apply.txt\n+++ tools/sv_patch/validation/artifacts/workspaces/execution_modes/tmp/plan_apply.txt\n@@ -0,0 +1 @@\n+from-pipeline\n",
+              "bytes_before": 0,
+              "bytes_after": 13,
+              "sha256_before": null,
+              "sha256_after": "4430c5ba987558c0104edafe5d822d3b77180f7ff39bcb8748acb62d93ba0d38",
+              "is_new": true,
+              "is_deleted": false
+            }
+          ],
+          "errors": []
+        },
+        {
+          "script": "tools/sv_patch/validation/scripts/execution_modes/strict_noop_fail_expected.rw",
+          "files": [
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/execution_modes/tmp/strict.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 1,
+                  "op": "UPSERT_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 2,
+                  "op": "REPLACE_REGEX",
+                  "changed": 0
+                }
+              ],
+              "diff": "--- tools/sv_patch/validation/artifacts/workspaces/execution_modes/tmp/strict.txt\n+++ tools/sv_patch/validation/artifacts/workspaces/execution_modes/tmp/strict.txt\n@@ -0,0 +1 @@\n+fixed\n",
+              "bytes_before": 0,
+              "bytes_after": 5,
+              "sha256_before": null,
+              "sha256_after": "992a93455c71fedd36ac9bbc439952c041cf61445958472af479269b8d873513",
+              "is_new": true,
+              "is_deleted": false
+            }
+          ],
+          "errors": [
+            {
+              "step": "execution-modes-contract",
+              "script": "tools/sv_patch/validation/scripts/execution_modes/strict_noop_fail_expected.rw",
+              "file": "tools/sv_patch/validation/artifacts/workspaces/execution_modes/tmp/strict.txt",
+              "line": 2,
+              "op": "REPLACE_REGEX",
+              "error": "STRICT_FAIL_EXPECTED_CHANGE",
+              "raw": "REPLACE_REGEX | tools/sv_patch/validation/artifacts/workspaces/execution_modes/tmp/strict.txt | DOES_NOT_MATCH | x"
+            }
+          ]
+        }
+      ],
+      "status": "FAILED"
+    }
+  ],
+  "errors": [
+    {
+      "step": "execution-modes-contract",
+      "script": "tools/sv_patch/validation/scripts/execution_modes/strict_noop_fail_expected.rw",
+      "file": "tools/sv_patch/validation/artifacts/workspaces/execution_modes/tmp/strict.txt",
+      "line": 2,
+      "op": "REPLACE_REGEX",
+      "error": "STRICT_FAIL_EXPECTED_CHANGE",
+      "raw": "REPLACE_REGEX | tools/sv_patch/validation/artifacts/workspaces/execution_modes/tmp/strict.txt | DOES_NOT_MATCH | x"
+    }
+  ],
+  "rollback": {
+    "attempted": false,
+    "files_restored": [],
+    "files_removed": []
+  },
+  "rejects": [],
+  "scans": [],
+  "summary_path": "/workspace/Project-Manager-SV-Patch/data/index/changes-summary.md",
+  "duration_ms": 1,
+  "history": {
+    "enabled": false
+  },
+  "pipeline": {
+    "steps": [
+      {
+        "name": "execution-modes-contract",
+        "scripts": [
+          "tools/sv_patch/validation/scripts/execution_modes/plan_mode_no_persist_expected.rw",
+          "tools/sv_patch/validation/scripts/execution_modes/strict_noop_fail_expected.rw"
+        ]
+      }
+    ]
+  }
+}

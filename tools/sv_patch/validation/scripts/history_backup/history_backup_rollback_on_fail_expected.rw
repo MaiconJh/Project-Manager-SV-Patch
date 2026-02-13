@@ -1,0 +1,3 @@
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/rollback.txt | baseline
+WRITE_FILE | tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/rollback.txt | changed-before-fail
+ASSERT_REGEX | tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/rollback.txt | impossible-pattern

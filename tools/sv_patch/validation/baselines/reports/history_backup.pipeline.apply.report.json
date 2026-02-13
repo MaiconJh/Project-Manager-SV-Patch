@@ -1,0 +1,172 @@
+{
+  "root": "/workspace/Project-Manager-SV-Patch",
+  "plan_only": false,
+  "strict": true,
+  "backup": true,
+  "rollback_on_fail": true,
+  "workers": 8,
+  "limits": {
+    "max_files": 500,
+    "max_total_write_bytes": 10000000,
+    "allowlist_prefixes": [
+      "."
+    ]
+  },
+  "steps": [
+    {
+      "name": "history-backup-contract",
+      "scripts": [
+        {
+          "script": "tools/sv_patch/validation/scripts/history_backup/history_backup_mod_and_delete_success.rw",
+          "files": [
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/keep.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 1,
+                  "op": "UPSERT_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 3,
+                  "op": "WRITE_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 5,
+                  "op": "ASSERT_REGEX",
+                  "changed": 0
+                }
+              ],
+              "diff": "--- tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/keep.txt\n+++ tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/keep.txt\n@@ -0,0 +1 @@\n+keep-v2\n",
+              "bytes_before": 0,
+              "bytes_after": 7,
+              "sha256_before": null,
+              "sha256_after": "ec62e725ff4f5bd099075cd67b30ad4e3ad81bf3eea13d72b4cc243efec94793",
+              "is_new": true,
+              "is_deleted": false
+            },
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/delete.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 2,
+                  "op": "UPSERT_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 4,
+                  "op": "DELETE_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 6,
+                  "op": "ASSERT_FILE_NOT_EXISTS",
+                  "changed": 0
+                }
+              ],
+              "diff": "",
+              "bytes_before": 0,
+              "bytes_after": 0,
+              "sha256_before": null,
+              "sha256_after": null,
+              "is_new": true,
+              "is_deleted": true
+            }
+          ],
+          "errors": []
+        },
+        {
+          "script": "tools/sv_patch/validation/scripts/history_backup/history_backup_rollback_on_fail_expected.rw",
+          "files": [
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/rollback.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 1,
+                  "op": "UPSERT_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 2,
+                  "op": "WRITE_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 3,
+                  "op": "ASSERT_REGEX",
+                  "changed": 0
+                }
+              ],
+              "diff": "--- tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/rollback.txt\n+++ tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/rollback.txt\n@@ -0,0 +1 @@\n+changed-before-fail\n",
+              "bytes_before": 0,
+              "bytes_after": 19,
+              "sha256_before": null,
+              "sha256_after": "3c928f98f00ade3cabdd5ef66b48dc11dab7da02953befe3c85c6d45f8de0ce5",
+              "is_new": true,
+              "is_deleted": false
+            }
+          ],
+          "errors": [
+            {
+              "step": "history-backup-contract",
+              "script": "tools/sv_patch/validation/scripts/history_backup/history_backup_rollback_on_fail_expected.rw",
+              "file": "tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/rollback.txt",
+              "line": 3,
+              "op": "ASSERT_REGEX",
+              "error": "ASSERT_REGEX_FAILED",
+              "raw": "ASSERT_REGEX | tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/rollback.txt | impossible-pattern"
+            }
+          ]
+        }
+      ],
+      "status": "FAILED"
+    }
+  ],
+  "errors": [
+    {
+      "step": "history-backup-contract",
+      "script": "tools/sv_patch/validation/scripts/history_backup/history_backup_rollback_on_fail_expected.rw",
+      "file": "tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/rollback.txt",
+      "line": 3,
+      "op": "ASSERT_REGEX",
+      "error": "ASSERT_REGEX_FAILED",
+      "raw": "ASSERT_REGEX | tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/rollback.txt | impossible-pattern"
+    }
+  ],
+  "rollback": {
+    "attempted": true,
+    "files_restored": [],
+    "files_removed": []
+  },
+  "rejects": [],
+  "scans": [],
+  "summary_path": "/workspace/Project-Manager-SV-Patch/data/index/changes-summary.md",
+  "duration_ms": 3,
+  "history": {
+    "enabled": true,
+    "run_id": "20260213T020749Z_ee919e8d",
+    "change_id": "d4a53ed1fee9",
+    "run_path": "data/history/runs/2026/02/13/20260213T020749Z_ee919e8d",
+    "manifest_path": "data/history/runs/2026/02/13/20260213T020749Z_ee919e8d/manifest.json",
+    "status": "FAILED_ROLLED_BACK",
+    "artifacts": {
+      "report_path": "data/history/runs/2026/02/13/20260213T020749Z_ee919e8d/artifacts/sv-report.json",
+      "summary_path": "data/history/runs/2026/02/13/20260213T020749Z_ee919e8d/artifacts/changes-summary.md"
+    }
+  },
+  "pipeline": {
+    "steps": [
+      {
+        "name": "history-backup-contract",
+        "scripts": [
+          "tools/sv_patch/validation/scripts/history_backup/history_backup_mod_and_delete_success.rw",
+          "tools/sv_patch/validation/scripts/history_backup/history_backup_rollback_on_fail_expected.rw"
+        ]
+      }
+    ]
+  }
+}

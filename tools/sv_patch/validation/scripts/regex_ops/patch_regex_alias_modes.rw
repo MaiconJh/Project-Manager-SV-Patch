@@ -1,0 +1,11 @@
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/patch.txt | <<EOF
+one
+two
+three
+EOF
+PATCH_REGEX | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/patch.txt | one | ONE | MODE=replace | FIRST=1
+PATCH_REGEX | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/patch.txt | ^two$ | two-before | MODE=insert_before
+PATCH_REGEX | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/patch.txt | ^two$ | two-after | MODE=insert_after
+PATCH_REGEX | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/patch.txt | three | MODE=delete
+ASSERT_REGEX | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/patch.txt | ONE
+ASSERT_NOT_REGEX | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/patch.txt | three

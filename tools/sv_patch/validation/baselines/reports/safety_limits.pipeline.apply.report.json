@@ -1,0 +1,164 @@
+{
+  "root": "/workspace/Project-Manager-SV-Patch",
+  "plan_only": false,
+  "strict": true,
+  "backup": false,
+  "rollback_on_fail": false,
+  "workers": 8,
+  "limits": {
+    "max_files": 1,
+    "max_total_write_bytes": 15,
+    "allowlist_prefixes": [
+      "tools/sv_patch/validation/artifacts/workspaces/safety_limits/tmp"
+    ]
+  },
+  "steps": [
+    {
+      "name": "safety-and-limit-contract",
+      "scripts": [
+        {
+          "script": "tools/sv_patch/validation/scripts/safety_limits/path_traversal_rejected_expected_fail.rw",
+          "files": [],
+          "errors": [
+            {
+              "step": "safety-and-limit-contract",
+              "script": "tools/sv_patch/validation/scripts/safety_limits/path_traversal_rejected_expected_fail.rw",
+              "file": "../outside.txt",
+              "line": 1,
+              "op": "ASSERT_FILE_EXISTS",
+              "error": "PATH_NOT_ALLOWED_OR_UNSAFE",
+              "raw": "ASSERT_FILE_EXISTS | ../outside.txt"
+            }
+          ]
+        },
+        {
+          "script": "tools/sv_patch/validation/scripts/safety_limits/allowlist_violation_expected_fail.rw",
+          "files": [],
+          "errors": [
+            {
+              "step": "safety-and-limit-contract",
+              "script": "tools/sv_patch/validation/scripts/safety_limits/allowlist_violation_expected_fail.rw",
+              "file": "tools/sv_patch/validation/artifacts/workspaces/safety_limits/denied/file.txt",
+              "line": 1,
+              "op": "UPSERT_FILE",
+              "error": "PATH_NOT_ALLOWED_OR_UNSAFE",
+              "raw": "UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/safety_limits/denied/file.txt | denied"
+            }
+          ]
+        },
+        {
+          "script": "tools/sv_patch/validation/scripts/safety_limits/max_files_limit_expected_fail.rw",
+          "files": [
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/safety_limits/tmp/a.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 1,
+                  "op": "UPSERT_FILE",
+                  "changed": 1
+                }
+              ],
+              "diff": "--- tools/sv_patch/validation/artifacts/workspaces/safety_limits/tmp/a.txt\n+++ tools/sv_patch/validation/artifacts/workspaces/safety_limits/tmp/a.txt\n@@ -0,0 +1 @@\n+a\n",
+              "bytes_before": 0,
+              "bytes_after": 1,
+              "sha256_before": null,
+              "sha256_after": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+              "is_new": true,
+              "is_deleted": false
+            },
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/safety_limits/tmp/b.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 2,
+                  "op": "UPSERT_FILE",
+                  "changed": 1
+                }
+              ],
+              "diff": "--- tools/sv_patch/validation/artifacts/workspaces/safety_limits/tmp/b.txt\n+++ tools/sv_patch/validation/artifacts/workspaces/safety_limits/tmp/b.txt\n@@ -0,0 +1 @@\n+b\n",
+              "bytes_before": 0,
+              "bytes_after": 1,
+              "sha256_before": null,
+              "sha256_after": "3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d",
+              "is_new": true,
+              "is_deleted": false
+            }
+          ],
+          "errors": []
+        },
+        {
+          "script": "tools/sv_patch/validation/scripts/safety_limits/max_bytes_limit_expected_fail.rw",
+          "files": [
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/safety_limits/tmp/bytes.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 1,
+                  "op": "UPSERT_FILE",
+                  "changed": 1
+                }
+              ],
+              "diff": "--- tools/sv_patch/validation/artifacts/workspaces/safety_limits/tmp/bytes.txt\n+++ tools/sv_patch/validation/artifacts/workspaces/safety_limits/tmp/bytes.txt\n@@ -0,0 +1 @@\n+1234567890ABCDEFGHIJ\n",
+              "bytes_before": 0,
+              "bytes_after": 20,
+              "sha256_before": null,
+              "sha256_after": "39cc4e7410ee75e49d98666adb26e928cf252c35fff90273a176cd74b19d9c8e",
+              "is_new": true,
+              "is_deleted": false
+            }
+          ],
+          "errors": []
+        }
+      ],
+      "status": "FAILED"
+    }
+  ],
+  "errors": [
+    {
+      "step": "safety-and-limit-contract",
+      "script": "tools/sv_patch/validation/scripts/safety_limits/path_traversal_rejected_expected_fail.rw",
+      "file": "../outside.txt",
+      "line": 1,
+      "op": "ASSERT_FILE_EXISTS",
+      "error": "PATH_NOT_ALLOWED_OR_UNSAFE",
+      "raw": "ASSERT_FILE_EXISTS | ../outside.txt"
+    },
+    {
+      "step": "safety-and-limit-contract",
+      "script": "tools/sv_patch/validation/scripts/safety_limits/allowlist_violation_expected_fail.rw",
+      "file": "tools/sv_patch/validation/artifacts/workspaces/safety_limits/denied/file.txt",
+      "line": 1,
+      "op": "UPSERT_FILE",
+      "error": "PATH_NOT_ALLOWED_OR_UNSAFE",
+      "raw": "UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/safety_limits/denied/file.txt | denied"
+    }
+  ],
+  "rollback": {
+    "attempted": false,
+    "files_restored": [],
+    "files_removed": []
+  },
+  "rejects": [],
+  "scans": [],
+  "summary_path": "/workspace/Project-Manager-SV-Patch/data/index/changes-summary.md",
+  "duration_ms": 1,
+  "history": {
+    "enabled": false
+  },
+  "pipeline": {
+    "steps": [
+      {
+        "name": "safety-and-limit-contract",
+        "scripts": [
+          "tools/sv_patch/validation/scripts/safety_limits/path_traversal_rejected_expected_fail.rw",
+          "tools/sv_patch/validation/scripts/safety_limits/allowlist_violation_expected_fail.rw",
+          "tools/sv_patch/validation/scripts/safety_limits/max_files_limit_expected_fail.rw",
+          "tools/sv_patch/validation/scripts/safety_limits/max_bytes_limit_expected_fail.rw"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,2 @@
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/safety_limits/tmp/a.txt | a
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/safety_limits/tmp/b.txt | b

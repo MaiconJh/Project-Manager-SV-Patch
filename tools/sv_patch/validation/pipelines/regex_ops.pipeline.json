@@ -1,0 +1,12 @@
+{
+  "steps": [
+    {
+      "name": "regex-ops-contract",
+      "scripts": [
+        "tools/sv_patch/validation/scripts/regex_ops/regex_insert_replace_delete_success.rw",
+        "tools/sv_patch/validation/scripts/regex_ops/replace_block_success.rw",
+        "tools/sv_patch/validation/scripts/regex_ops/patch_regex_alias_modes.rw"
+      ]
+    }
+  ]
+}

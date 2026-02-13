@@ -1,0 +1,3 @@
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/delete_me.txt | to-delete
+DELETE_FILE | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/delete_me.txt
+ASSERT_FILE_NOT_EXISTS | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/delete_me.txt

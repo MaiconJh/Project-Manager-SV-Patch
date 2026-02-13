@@ -84,6 +84,64 @@ body{
 .panelTitle{font-weight:700}
 .panelMeta{color:var(--muted); font-size:12px}
 
+.panelHeadTools{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  min-width:0;
+}
+
+.filesSearchWrap{
+  position:relative;
+  display:flex;
+  align-items:center;
+  min-width:0;
+}
+
+.filesSearchInput{
+  width:150px;
+  height:26px;
+  border:1px solid var(--border);
+  border-radius:7px;
+  background:rgba(13,17,23,.65);
+  color:var(--text);
+  font-size:12px;
+  padding:0 22px 0 8px;
+  outline:none;
+}
+
+.filesSearchInput::placeholder{ color:var(--muted); }
+
+.filesSearchInput:focus{
+  border-color:var(--border2);
+  box-shadow:0 0 0 1px rgba(201,209,217,.08);
+}
+
+.filesSearchClear{
+  position:absolute;
+  right:4px;
+  width:18px;
+  height:18px;
+  border:none;
+  border-radius:50%;
+  background:transparent;
+  color:var(--muted);
+  font-size:14px;
+  line-height:1;
+  display:none;
+  align-items:center;
+  justify-content:center;
+  cursor:pointer;
+  padding:0;
+}
+
+.filesSearchClear:hover{
+  color:var(--text);
+  background:rgba(201,209,217,.08);
+}
+
+.filesSearchWrap.hasValue .filesSearchClear{ display:inline-flex; }
+
 .panelFoot{
   padding:10px 12px;
   border-top:1px solid var(--border);
@@ -1496,4 +1554,273 @@ body.has-apply-diff .applyDiffModal{
   .applyDiffPane:last-child{
     border-bottom:none;
   }
+}
+
+/* =========================================================
+   GitHub-like Files Tree visual refinement (visual-only)
+   Scope: Files panel tree rows/actions/search alignment
+   ========================================================= */
+.panel.files .panelHead{
+  align-items:center;
+  gap:10px;
+}
+
+.panel.files .panelHeadTools{
+  margin-left:auto;
+}
+
+.panel.files .fileList{
+  padding:4px 0;
+}
+
+.panel.files .row{
+  min-height:30px;
+  gap:8px;
+  padding:3px 12px;
+  border-bottom:1px solid rgba(240,246,252,.06);
+  background:transparent;
+  transition:background-color .12s ease, box-shadow .12s ease;
+}
+
+.panel.files .row:hover{
+  background:rgba(177,186,196,.12);
+}
+
+.panel.files .row.selected{
+  background:rgba(56,139,253,.16);
+  outline:none;
+  box-shadow:inset 2px 0 0 rgba(56,139,253,.78);
+}
+
+.panel.files .rowLeft{
+  gap:8px;
+}
+
+.panel.files .caret{
+  width:16px;
+  height:16px;
+  border-radius:4px;
+}
+
+.panel.files .caret .ico{
+  width:12px;
+  height:12px;
+}
+
+.panel.files .fileIco{
+  color:#8b949e;
+}
+
+.panel.files .row:hover .fileIco,
+.panel.files .row.selected .fileIco{
+  color:#c9d1d9;
+}
+
+.panel.files .name{
+  flex:1 1 auto;
+  font-size:14px;
+}
+
+.panel.files .actions{
+  margin-left:auto;
+  gap:4px;
+  opacity:0;
+  visibility:hidden;
+  transform:translateX(2px);
+  transition:opacity .12s ease, visibility .12s ease, transform .12s ease;
+}
+
+.panel.files .row:hover .actions,
+.panel.files .row.selected .actions,
+.panel.files .row.ignored .actions{
+  opacity:1;
+  visibility:visible;
+  pointer-events:auto;
+  transform:translateX(0);
+}
+
+.panel.files .actionBtn{
+  width:22px;
+  height:22px;
+  padding:0;
+  border-radius:6px;
+  align-items:center;
+  justify-content:center;
+}
+
+.panel.files .actionBtn .ico{
+  width:14px;
+  height:14px;
+}
+
+.panel.files .badge{
+  line-height:1.35;
+  background:rgba(110,118,129,.16);
+  border-color:rgba(110,118,129,.35);
+}
+
+/* Keep Files search compact and aligned with GitHub-like header controls */
+.panel.files .filesSearchInput{
+  width:170px;
+  height:24px;
+  border-radius:6px;
+  background:rgba(13,17,23,.88);
+  border-color:rgba(48,54,61,.9);
+  font-size:12px;
+}
+
+.panel.files .filesSearchInput:focus{
+  border-color:rgba(56,139,253,.65);
+  box-shadow:0 0 0 1px rgba(56,139,253,.32);
+}
+
+.panel.files .filesSearchClear{
+  width:16px;
+  height:16px;
+  right:5px;
+  border-radius:4px;
+}
+
+/* =========================================================
+   File Viewer editor UX add-ons: line numbers + find bar
+   (visual + local editor chrome only)
+   ========================================================= */
+.fvEditWrap{
+  position:relative;
+  height:100%;
+  display:none;
+}
+
+.fvEditMain{
+  display:flex;
+  align-items:stretch;
+  height:100%;
+  min-height:0;
+}
+
+.fvGutter{
+  width:52px;
+  flex:0 0 52px;
+  border-right:1px solid rgba(240,246,252,.10);
+  background:rgba(0,0,0,.16);
+  color:var(--muted);
+  overflow:hidden;
+  user-select:none;
+}
+
+.fvGutter pre{
+  margin:0;
+  padding:12px 8px 12px 0;
+  text-align:right;
+  font-family:var(--mono);
+  font-size:12.5px;
+  line-height:1.45;
+  white-space:pre;
+}
+
+.fvEditWrap .fvEditor{
+  flex:1 1 auto;
+  min-width:0;
+  min-height:0;
+}
+
+.fvFindBar{
+  position:absolute;
+  top:8px;
+  right:10px;
+  z-index:2;
+  display:flex;
+  align-items:center;
+  gap:6px;
+  padding:6px;
+  border:1px solid rgba(240,246,252,.12);
+  border-radius:8px;
+  background:rgba(13,17,23,.94);
+  box-shadow:0 8px 20px rgba(0,0,0,.35);
+}
+
+.fvFindInput{
+  width:170px;
+  height:26px;
+  border:1px solid var(--border);
+  border-radius:6px;
+  background:rgba(0,0,0,.20);
+  color:var(--text);
+  font-size:12px;
+  font-family:var(--font);
+  padding:0 8px;
+  outline:none;
+}
+
+.fvFindInput:focus{
+  border-color:rgba(56,139,253,.65);
+  box-shadow:0 0 0 1px rgba(56,139,253,.32);
+}
+
+.fvFindBtn{
+  height:26px;
+  min-width:30px;
+  border:1px solid rgba(240,246,252,.12);
+  border-radius:6px;
+  background:rgba(255,255,255,.03);
+  color:var(--text);
+  font-size:12px;
+  padding:0 8px;
+  cursor:pointer;
+}
+
+.fvFindBtn:hover{
+  background:rgba(255,255,255,.08);
+}
+
+.fvFindStatus{
+  min-width:56px;
+  color:var(--muted);
+  font-size:11px;
+  text-align:right;
+}
+
+/* keep text visible while find bar overlays top-right */
+.fvEditWrap.find-open .fvEditor,
+.fvEditWrap.find-open .fvGutter pre{
+  padding-top:40px;
+}
+
+
+/* =========================================================
+   File Viewer view-mode line numbers (plain/raw code view)
+   ========================================================= */
+.fvCodeWithLines{
+  display:grid;
+  grid-template-columns:52px minmax(0,1fr);
+  align-items:start;
+  min-width:100%;
+}
+
+.fvLineNums{
+  margin:0;
+  padding:12px 8px 12px 0;
+  text-align:right;
+  border-right:1px solid rgba(240,246,252,.10);
+  background:rgba(0,0,0,.16);
+  color:var(--muted);
+  user-select:none;
+  font-family:var(--mono);
+  font-size:12.5px;
+  line-height:1.45;
+  white-space:pre;
+}
+
+.fvCodeWithLines .fvCode{
+  min-width:0;
+  margin:0;
+}
+
+/* Find bar visibility hardening (prevents stuck/open-on-load regressions) */
+.fvFindBar[hidden]{
+  display:none !important;
+}
+
+.fvCard[data-find-open="0"] .fvFindBar{
+  pointer-events:none;
 }

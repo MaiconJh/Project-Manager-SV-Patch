@@ -1,0 +1,5 @@
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/heredoc.txt | <<ENDTXT
+line-a
+line-b
+ENDTXT
+ASSERT_REGEX | tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/heredoc.txt | line-a\nline-b

@@ -1,0 +1,4 @@
+WRITE_FILE | tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/heredoc.txt | top
+middle
+bottom
+ASSERT_REGEX | tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/heredoc.txt | top\nmiddle\nbottom

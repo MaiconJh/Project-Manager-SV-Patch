@@ -84,6 +84,64 @@ body{
 .panelTitle{font-weight:700}
 .panelMeta{color:var(--muted); font-size:12px}
 
+.panelHeadTools{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  min-width:0;
+}
+
+.filesSearchWrap{
+  position:relative;
+  display:flex;
+  align-items:center;
+  min-width:0;
+}
+
+.filesSearchInput{
+  width:150px;
+  height:26px;
+  border:1px solid var(--border);
+  border-radius:7px;
+  background:rgba(13,17,23,.65);
+  color:var(--text);
+  font-size:12px;
+  padding:0 22px 0 8px;
+  outline:none;
+}
+
+.filesSearchInput::placeholder{ color:var(--muted); }
+
+.filesSearchInput:focus{
+  border-color:var(--border2);
+  box-shadow:0 0 0 1px rgba(201,209,217,.08);
+}
+
+.filesSearchClear{
+  position:absolute;
+  right:4px;
+  width:18px;
+  height:18px;
+  border:none;
+  border-radius:50%;
+  background:transparent;
+  color:var(--muted);
+  font-size:14px;
+  line-height:1;
+  display:none;
+  align-items:center;
+  justify-content:center;
+  cursor:pointer;
+  padding:0;
+}
+
+.filesSearchClear:hover{
+  color:var(--text);
+  background:rgba(201,209,217,.08);
+}
+
+.filesSearchWrap.hasValue .filesSearchClear{ display:inline-flex; }
+
 .panelFoot{
   padding:10px 12px;
   border-top:1px solid var(--border);

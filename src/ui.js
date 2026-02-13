@@ -12,6 +12,9 @@ const expanded = new Set();
 const expandedPaths = new Set(); // absPath set to preserve expanded state across refreshes
 let selectedId = null;
 
+let filesSearchQuery = "";
+let filesSearchDebounceTimer = null;
+
 let currentPipelinePath = null;
 let lastSnapshot = null;
 let _applyDiffPreviewNonce = 0;
@@ -781,6 +784,79 @@ function flattenTree(node, depth, out, ignoredSet) {
   }
 }
 
+function _fileSearchMode(query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return null;
+  return {
+    query: q,
+    byPath: q.includes("/"),
+  };
+}
+
+function _nodeMatchesSearch(node, searchMode) {
+  if (!searchMode) return true;
+  const name = String(node.name || "").toLowerCase();
+  if (!searchMode.byPath) return name.includes(searchMode.query);
+
+  const relPath = String(node.relPath || node.absPath || node.name || "").replaceAll("\\", "/").toLowerCase();
+  return relPath.includes(searchMode.query);
+}
+
+function flattenTreeFiltered(node, depth, out, ignoredSet, searchMode) {
+  const hasChildren = node.isDir && node.children && node.children.length > 0;
+  const selfMatches = _nodeMatchesSearch(node, searchMode);
+  let childMatched = false;
+  const childRows = [];
+
+  if (hasChildren) {
+    for (const ch of node.children) {
+      if (flattenTreeFiltered(ch, depth + 1, childRows, ignoredSet, searchMode)) childMatched = true;
+    }
+  }
+
+  if (selfMatches || childMatched) {
+    out.push({
+      id: node.id,
+      name: node.name,
+      absPath: node.absPath,
+      isDir: node.isDir,
+      hasChildren,
+      depth,
+      ignored: ignoredSet.has(node.absPath),
+    });
+    if (childRows.length) out.push(...childRows);
+    return true;
+  }
+
+  return false;
+}
+
+function _updateFilesSearchUi() {
+  const wrap = el("filesSearchWrap");
+  const clearBtn = el("filesSearchClear");
+  const hasValue = String(filesSearchQuery || "").trim().length > 0;
+  if (wrap) wrap.classList.toggle("hasValue", hasValue);
+  if (clearBtn) clearBtn.style.display = hasValue ? "inline-flex" : "none";
+}
+
+function _setFilesSearchQuery(nextQuery) {
+  filesSearchQuery = String(nextQuery || "");
+  const input = el("filesSearchInput");
+  if (input && input.value !== filesSearchQuery) input.value = filesSearchQuery;
+  _updateFilesSearchUi();
+  if (lastSnapshot) render(lastSnapshot);
+}
+
+function _updateItemsCount(snapshot, visibleCount) {
+  const total = Number(snapshot?.stats?.items || 0);
+  const hasFilter = String(filesSearchQuery || "").trim().length > 0;
+  if (hasFilter && Number.isFinite(visibleCount)) {
+    el("itemsCount").textContent = `${visibleCount} / ${total} items`;
+    return;
+  }
+  el("itemsCount").textContent = `${total} items`;
+}
+
 function _virtualRange(total, rowH, viewportH, scrollTop, overscan) {
   if (!total) return { start: 0, end: 0 };
   const first = Math.floor(scrollTop / rowH);
@@ -994,6 +1070,7 @@ function render(snapshot) {
 
   el("projectPath").textContent = snapshot.projectPath || "No folder opened";
   el("itemsCount").textContent = `${snapshot.stats.items} items`;
+  _updateItemsCount(snapshot, null);
   el("statusLine").textContent = snapshot.status || "Ready.";
 
   el("stats").textContent =
@@ -1074,9 +1151,18 @@ try{
   }
 
   const rows = [];
-  for (const ch of snapshot.tree.children || []) {
-    flattenTree(ch, 0, rows, ignoredSet);
+  const searchMode = _fileSearchMode(filesSearchQuery);
+  if (searchMode) {
+    for (const ch of snapshot.tree.children || []) {
+      flattenTreeFiltered(ch, 0, rows, ignoredSet, searchMode);
+    }
+  } else {
+    for (const ch of snapshot.tree.children || []) {
+      flattenTree(ch, 0, rows, ignoredSet);
+    }
   }
+
+  _updateItemsCount(snapshot, rows.length);
 
   _fileRowsCache = rows;
   _fileRowsSnapshot = snapshot;
@@ -1789,6 +1875,33 @@ async function _confirmApplyFromDiffModal() {
 function bind() {
   setTabs();
   _bindFileListVirtualEvents();
+
+  const filesSearchInput = el("filesSearchInput");
+  const filesSearchClear = el("filesSearchClear");
+
+  filesSearchInput?.addEventListener("input", () => {
+    const value = filesSearchInput.value || "";
+    if (filesSearchDebounceTimer) clearTimeout(filesSearchDebounceTimer);
+    filesSearchDebounceTimer = setTimeout(() => {
+      _setFilesSearchQuery(value);
+    }, 200);
+  });
+
+  filesSearchInput?.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape") return;
+    if (!filesSearchInput.value && !filesSearchQuery) return;
+    ev.preventDefault();
+    if (filesSearchDebounceTimer) clearTimeout(filesSearchDebounceTimer);
+    _setFilesSearchQuery("");
+  });
+
+  filesSearchClear?.addEventListener("click", () => {
+    if (filesSearchDebounceTimer) clearTimeout(filesSearchDebounceTimer);
+    _setFilesSearchQuery("");
+    filesSearchInput?.focus();
+  });
+
+  _updateFilesSearchUi();
 
   el("btnOpen").addEventListener("click", async () => {
     await ipcRenderer.invoke("project:open");

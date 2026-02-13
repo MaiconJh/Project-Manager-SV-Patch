@@ -433,6 +433,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   let editing = false;
   let mdRaw = false;
   let _lineNumberTimer = null;
+  let _findOpen = false;
 
   const isMd = isMarkdownExt(ext);
 
@@ -474,7 +475,9 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     const findBar = cardEl?.querySelector("[data-findbar]");
     const findInput = cardEl?.querySelector("[data-find-input]");
     const editWrap = cardEl?.querySelector("[data-edit-wrap]");
-    if (!findBar || !findInput || !editWrap) return;
+    if (!findBar || !findInput || !editWrap || !editing) return;
+    _findOpen = true;
+    cardEl.dataset.findOpen = "1";
     findBar.hidden = false;
     editWrap.classList.add("find-open");
     findInput.focus();
@@ -486,6 +489,8 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     const editWrap = cardEl?.querySelector("[data-edit-wrap]");
     const editor = cardEl?.querySelector("[data-editor]");
     const findStatus = cardEl?.querySelector("[data-find-status]");
+    _findOpen = false;
+    if (cardEl) cardEl.dataset.findOpen = "0";
     if (findBar) findBar.hidden = true;
     if (editWrap) editWrap.classList.remove("find-open");
     if (findStatus) findStatus.textContent = "";
@@ -555,6 +560,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   }
 
   function setEditing(on) {
+    closeFindBar(card, false);
     editing = Boolean(on);
     const editor = card.querySelector("[data-editor]");
     const editWrap = card.querySelector("[data-edit-wrap]");
@@ -576,7 +582,6 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       editor.style.display = editing ? "" : "none";
       if (editing) editor.value = current;
     }
-    if (!editing) closeFindBar(card, false);
     if (editing) {
       const gutterPre = card.querySelector("[data-lines]");
       const gutter = card.querySelector("[data-gutter]");
@@ -835,7 +840,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     }
     if (String(e.key || "") === "Escape") {
       const findBar = card.querySelector("[data-findbar]");
-      if (findBar && !findBar.hidden) {
+      if (_findOpen && findBar && !findBar.hidden) {
         e.preventDefault();
         closeFindBar(card, true);
       }

@@ -1815,3 +1815,12 @@ body.has-apply-diff .applyDiffModal{
   min-width:0;
   margin:0;
 }
+
+/* Find bar visibility hardening (prevents stuck/open-on-load regressions) */
+.fvFindBar[hidden]{
+  display:none !important;
+}
+
+.fvCard[data-find-open="0"] .fvFindBar{
+  pointer-events:none;
+}

@@ -1,0 +1,11 @@
+{
+  "steps": [
+    {
+      "name": "history-backup-contract",
+      "scripts": [
+        "tools/sv_patch/validation/scripts/history_backup/history_backup_mod_and_delete_success.rw",
+        "tools/sv_patch/validation/scripts/history_backup/history_backup_rollback_on_fail_expected.rw"
+      ]
+    }
+  ]
+}

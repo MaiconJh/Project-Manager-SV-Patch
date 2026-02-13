@@ -1,0 +1,2 @@
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/execution_modes/tmp/strict.txt | fixed
+REPLACE_REGEX | tools/sv_patch/validation/artifacts/workspaces/execution_modes/tmp/strict.txt | DOES_NOT_MATCH | x

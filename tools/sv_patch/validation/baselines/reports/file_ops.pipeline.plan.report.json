@@ -1,0 +1,217 @@
+{
+  "root": "/workspace/Project-Manager-SV-Patch",
+  "plan_only": true,
+  "strict": false,
+  "backup": false,
+  "rollback_on_fail": false,
+  "workers": 8,
+  "limits": {
+    "max_files": 500,
+    "max_total_write_bytes": 10000000,
+    "allowlist_prefixes": [
+      "."
+    ]
+  },
+  "steps": [
+    {
+      "name": "file-ops-contract",
+      "scripts": [
+        {
+          "script": "tools/sv_patch/validation/scripts/file_ops/delete_existing_success.rw",
+          "files": [
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/delete_me.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 1,
+                  "op": "UPSERT_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 2,
+                  "op": "DELETE_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 3,
+                  "op": "ASSERT_FILE_NOT_EXISTS",
+                  "changed": 0
+                }
+              ],
+              "diff": "",
+              "bytes_before": 0,
+              "bytes_after": 0,
+              "sha256_before": null,
+              "sha256_after": null,
+              "is_new": true,
+              "is_deleted": true
+            }
+          ],
+          "errors": []
+        },
+        {
+          "script": "tools/sv_patch/validation/scripts/file_ops/delete_missing_allow_noop.rw",
+          "files": [
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/missing_noop.txt",
+              "changed": false,
+              "ops": [
+                {
+                  "line": 1,
+                  "op": "DELETE_FILE",
+                  "changed": 0
+                },
+                {
+                  "line": 2,
+                  "op": "ASSERT_FILE_NOT_EXISTS",
+                  "changed": 0
+                }
+              ],
+              "diff": null,
+              "bytes_before": 0,
+              "bytes_after": 0,
+              "sha256_before": null,
+              "sha256_after": null,
+              "is_new": false,
+              "is_deleted": false
+            }
+          ],
+          "errors": []
+        },
+        {
+          "script": "tools/sv_patch/validation/scripts/file_ops/move_self_target_noop.rw",
+          "files": [
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/self.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 1,
+                  "op": "UPSERT_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 2,
+                  "op": "MOVE_FILE",
+                  "changed": 0,
+                  "to": "tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/self.txt"
+                },
+                {
+                  "line": 2,
+                  "op": "MOVE_FILE",
+                  "changed": 0,
+                  "from": "tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/self.txt"
+                },
+                {
+                  "line": 3,
+                  "op": "ASSERT_FILE_EXISTS",
+                  "changed": 0
+                },
+                {
+                  "line": 4,
+                  "op": "ASSERT_REGEX",
+                  "changed": 0
+                }
+              ],
+              "diff": "--- tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/self.txt\n+++ tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/self.txt\n@@ -0,0 +1 @@\n+stable-content\n",
+              "bytes_before": 0,
+              "bytes_after": 14,
+              "sha256_before": null,
+              "sha256_after": "08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c",
+              "is_new": true,
+              "is_deleted": false
+            }
+          ],
+          "errors": []
+        },
+        {
+          "script": "tools/sv_patch/validation/scripts/file_ops/copy_overwrite_success.rw",
+          "files": [
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/source.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 1,
+                  "op": "UPSERT_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 3,
+                  "op": "COPY_FILE",
+                  "changed": 1,
+                  "to": "tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/dest.txt"
+                }
+              ],
+              "diff": "--- tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/source.txt\n+++ tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/source.txt\n@@ -0,0 +1 @@\n+payload-v2\n",
+              "bytes_before": 0,
+              "bytes_after": 10,
+              "sha256_before": null,
+              "sha256_after": "0cbfa847619d688226855278706687a40d82dd74d8ab8ba7cef414309ebfb1d6",
+              "is_new": true,
+              "is_deleted": false
+            },
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/dest.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 2,
+                  "op": "UPSERT_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 3,
+                  "op": "COPY_FILE",
+                  "changed": 1,
+                  "from": "tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/source.txt"
+                },
+                {
+                  "line": 4,
+                  "op": "ASSERT_REGEX",
+                  "changed": 0
+                }
+              ],
+              "diff": "--- tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/dest.txt\n+++ tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/dest.txt\n@@ -0,0 +1 @@\n+payload-v2\n",
+              "bytes_before": 0,
+              "bytes_after": 10,
+              "sha256_before": null,
+              "sha256_after": "0cbfa847619d688226855278706687a40d82dd74d8ab8ba7cef414309ebfb1d6",
+              "is_new": true,
+              "is_deleted": false
+            }
+          ],
+          "errors": []
+        }
+      ],
+      "status": "OK"
+    }
+  ],
+  "errors": [],
+  "rollback": {
+    "attempted": false,
+    "files_restored": [],
+    "files_removed": []
+  },
+  "rejects": [],
+  "scans": [],
+  "summary_path": "/workspace/Project-Manager-SV-Patch/data/index/changes-summary.md",
+  "duration_ms": 3,
+  "history": {
+    "enabled": false
+  },
+  "pipeline": {
+    "steps": [
+      {
+        "name": "file-ops-contract",
+        "scripts": [
+          "tools/sv_patch/validation/scripts/file_ops/delete_existing_success.rw",
+          "tools/sv_patch/validation/scripts/file_ops/delete_missing_allow_noop.rw",
+          "tools/sv_patch/validation/scripts/file_ops/move_self_target_noop.rw",
+          "tools/sv_patch/validation/scripts/file_ops/copy_overwrite_success.rw"
+        ]
+      }
+    ]
+  }
+}

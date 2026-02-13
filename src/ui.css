@@ -1555,3 +1555,128 @@ body.has-apply-diff .applyDiffModal{
     border-bottom:none;
   }
 }
+
+/* =========================================================
+   GitHub-like Files Tree visual refinement (visual-only)
+   Scope: Files panel tree rows/actions/search alignment
+   ========================================================= */
+.panel.files .panelHead{
+  align-items:center;
+  gap:10px;
+}
+
+.panel.files .panelHeadTools{
+  margin-left:auto;
+}
+
+.panel.files .fileList{
+  padding:4px 0;
+}
+
+.panel.files .row{
+  min-height:30px;
+  gap:8px;
+  padding:3px 12px;
+  border-bottom:1px solid rgba(240,246,252,.06);
+  background:transparent;
+  transition:background-color .12s ease, box-shadow .12s ease;
+}
+
+.panel.files .row:hover{
+  background:rgba(177,186,196,.12);
+}
+
+.panel.files .row.selected{
+  background:rgba(56,139,253,.16);
+  outline:none;
+  box-shadow:inset 2px 0 0 rgba(56,139,253,.78);
+}
+
+.panel.files .rowLeft{
+  gap:8px;
+}
+
+.panel.files .caret{
+  width:16px;
+  height:16px;
+  border-radius:4px;
+}
+
+.panel.files .caret .ico{
+  width:12px;
+  height:12px;
+}
+
+.panel.files .fileIco{
+  color:#8b949e;
+}
+
+.panel.files .row:hover .fileIco,
+.panel.files .row.selected .fileIco{
+  color:#c9d1d9;
+}
+
+.panel.files .name{
+  flex:1 1 auto;
+  font-size:14px;
+}
+
+.panel.files .actions{
+  margin-left:auto;
+  gap:4px;
+  opacity:0;
+  visibility:hidden;
+  transform:translateX(2px);
+  transition:opacity .12s ease, visibility .12s ease, transform .12s ease;
+}
+
+.panel.files .row:hover .actions,
+.panel.files .row.selected .actions,
+.panel.files .row.ignored .actions{
+  opacity:1;
+  visibility:visible;
+  pointer-events:auto;
+  transform:translateX(0);
+}
+
+.panel.files .actionBtn{
+  width:22px;
+  height:22px;
+  padding:0;
+  border-radius:6px;
+  align-items:center;
+  justify-content:center;
+}
+
+.panel.files .actionBtn .ico{
+  width:14px;
+  height:14px;
+}
+
+.panel.files .badge{
+  line-height:1.35;
+  background:rgba(110,118,129,.16);
+  border-color:rgba(110,118,129,.35);
+}
+
+/* Keep Files search compact and aligned with GitHub-like header controls */
+.panel.files .filesSearchInput{
+  width:170px;
+  height:24px;
+  border-radius:6px;
+  background:rgba(13,17,23,.88);
+  border-color:rgba(48,54,61,.9);
+  font-size:12px;
+}
+
+.panel.files .filesSearchInput:focus{
+  border-color:rgba(56,139,253,.65);
+  box-shadow:0 0 0 1px rgba(56,139,253,.32);
+}
+
+.panel.files .filesSearchClear{
+  width:16px;
+  height:16px;
+  right:5px;
+  border-radius:4px;
+}

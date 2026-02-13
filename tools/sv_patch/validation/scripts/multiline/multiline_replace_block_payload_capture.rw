@@ -1,0 +1,12 @@
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/block_payload.txt | <<EOF
+AA
+BEGIN
+old
+END
+ZZ
+EOF
+REPLACE_BLOCK | tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/block_payload.txt | ^BEGIN$ | ^END$ | <<PAY
+new-1
+new-2
+PAY
+ASSERT_REGEX | tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/block_payload.txt | new-1\nnew-2

@@ -1,0 +1,4 @@
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/self.txt | stable-content
+MOVE_FILE | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/self.txt | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/self.txt | ALLOW_NOOP=1
+ASSERT_FILE_EXISTS | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/self.txt
+ASSERT_REGEX | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/self.txt | stable-content

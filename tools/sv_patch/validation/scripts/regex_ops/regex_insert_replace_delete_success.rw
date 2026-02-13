@@ -1,0 +1,12 @@
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/regex.txt | <<EOF
+alpha
+beta
+gamma
+EOF
+INSERT_BEFORE_REGEX | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/regex.txt | ^beta$ | before-beta
+INSERT_AFTER_REGEX | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/regex.txt | ^beta$ | after-beta
+REPLACE_REGEX_FIRST | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/regex.txt | alpha | ALPHA
+REPLACE_REGEX | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/regex.txt | gamma | GAMMA
+DELETE_REGEX | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/regex.txt | ^after-beta$
+ASSERT_REGEX | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/regex.txt | ALPHA
+ASSERT_NOT_REGEX | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/regex.txt | ^after-beta$

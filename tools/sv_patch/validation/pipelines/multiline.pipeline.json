@@ -1,0 +1,12 @@
+{
+  "steps": [
+    {
+      "name": "multiline-contract",
+      "scripts": [
+        "tools/sv_patch/validation/scripts/multiline/multiline_heredoc_capture.rw",
+        "tools/sv_patch/validation/scripts/multiline/multiline_implicit_capture.rw",
+        "tools/sv_patch/validation/scripts/multiline/multiline_replace_block_payload_capture.rw"
+      ]
+    }
+  ]
+}

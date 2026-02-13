@@ -1,0 +1,140 @@
+{
+  "root": "/workspace/Project-Manager-SV-Patch",
+  "plan_only": false,
+  "strict": false,
+  "backup": false,
+  "rollback_on_fail": false,
+  "workers": 8,
+  "limits": {
+    "max_files": 500,
+    "max_total_write_bytes": 10000000,
+    "allowlist_prefixes": [
+      "."
+    ]
+  },
+  "steps": [
+    {
+      "name": "multiline-contract",
+      "scripts": [
+        {
+          "script": "tools/sv_patch/validation/scripts/multiline/multiline_heredoc_capture.rw",
+          "files": [
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/heredoc.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 1,
+                  "op": "UPSERT_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 5,
+                  "op": "ASSERT_REGEX",
+                  "changed": 0
+                }
+              ],
+              "diff": "--- tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/heredoc.txt\n+++ tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/heredoc.txt\n@@ -0,0 +1,2 @@\n+line-a\n\n+line-b\n",
+              "bytes_before": 0,
+              "bytes_after": 13,
+              "sha256_before": null,
+              "sha256_after": "ad843782de8cefed3d218fc976e7326b48da16df0492c06aedfb0a8aee4b0e2f",
+              "is_new": true,
+              "is_deleted": false
+            }
+          ],
+          "errors": []
+        },
+        {
+          "script": "tools/sv_patch/validation/scripts/multiline/multiline_implicit_capture.rw",
+          "files": [
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/heredoc.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 1,
+                  "op": "WRITE_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 4,
+                  "op": "ASSERT_REGEX",
+                  "changed": 0
+                }
+              ],
+              "diff": "--- tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/heredoc.txt\n+++ tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/heredoc.txt\n@@ -0,0 +1,3 @@\n+top\n\n+middle\n\n+bottom\n",
+              "bytes_before": 0,
+              "bytes_after": 17,
+              "sha256_before": null,
+              "sha256_after": "ae4b53d8b50e41dde9ca87ed9b00bd2bad7307169af45b07dc229d4e8265186b",
+              "is_new": false,
+              "is_deleted": false
+            }
+          ],
+          "errors": []
+        },
+        {
+          "script": "tools/sv_patch/validation/scripts/multiline/multiline_replace_block_payload_capture.rw",
+          "files": [
+            {
+              "file": "tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/block_payload.txt",
+              "changed": true,
+              "ops": [
+                {
+                  "line": 1,
+                  "op": "UPSERT_FILE",
+                  "changed": 1
+                },
+                {
+                  "line": 8,
+                  "op": "REPLACE_BLOCK",
+                  "changed": 1
+                },
+                {
+                  "line": 12,
+                  "op": "ASSERT_REGEX",
+                  "changed": 0
+                }
+              ],
+              "diff": "--- tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/block_payload.txt\n+++ tools/sv_patch/validation/artifacts/workspaces/multiline/tmp/block_payload.txt\n@@ -0,0 +1,4 @@\n+AA\n\n+new-1\n\n+new-2\n\n+ZZ\n",
+              "bytes_before": 0,
+              "bytes_after": 17,
+              "sha256_before": null,
+              "sha256_after": "531ec2bf61eca3c483251e76da812ff8dc43142ea6845b66d59eb589a3450996",
+              "is_new": true,
+              "is_deleted": false
+            }
+          ],
+          "errors": []
+        }
+      ],
+      "status": "OK"
+    }
+  ],
+  "errors": [],
+  "rollback": {
+    "attempted": false,
+    "files_restored": [],
+    "files_removed": []
+  },
+  "rejects": [],
+  "scans": [],
+  "summary_path": "/workspace/Project-Manager-SV-Patch/data/index/changes-summary.md",
+  "duration_ms": 3,
+  "history": {
+    "enabled": false
+  },
+  "pipeline": {
+    "steps": [
+      {
+        "name": "multiline-contract",
+        "scripts": [
+          "tools/sv_patch/validation/scripts/multiline/multiline_heredoc_capture.rw",
+          "tools/sv_patch/validation/scripts/multiline/multiline_implicit_capture.rw",
+          "tools/sv_patch/validation/scripts/multiline/multiline_replace_block_payload_capture.rw"
+        ]
+      }
+    ]
+  }
+}

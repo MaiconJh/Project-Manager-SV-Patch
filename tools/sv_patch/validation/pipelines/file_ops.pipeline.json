@@ -1,0 +1,13 @@
+{
+  "steps": [
+    {
+      "name": "file-ops-contract",
+      "scripts": [
+        "tools/sv_patch/validation/scripts/file_ops/delete_existing_success.rw",
+        "tools/sv_patch/validation/scripts/file_ops/delete_missing_allow_noop.rw",
+        "tools/sv_patch/validation/scripts/file_ops/move_self_target_noop.rw",
+        "tools/sv_patch/validation/scripts/file_ops/copy_overwrite_success.rw"
+      ]
+    }
+  ]
+}

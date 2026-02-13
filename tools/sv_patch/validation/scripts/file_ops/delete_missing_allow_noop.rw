@@ -1,0 +1,2 @@
+DELETE_FILE | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/missing_noop.txt | ALLOW_NOOP=1
+ASSERT_FILE_NOT_EXISTS | tools/sv_patch/validation/artifacts/workspaces/file_ops/tmp/missing_noop.txt

@@ -6,6 +6,7 @@ import difflib
 import hashlib
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -82,17 +83,25 @@ def rel_norm(path: str) -> str:
     return os.path.normpath(s).replace("\\", "/")
 
 def is_path_safe(rel_path: str, root_abs: str) -> bool:
-    """Verifica se o caminho não tenta escapar do root (path traversal)"""
+    """Verifica se o caminho nÃ£o tenta escapar do root (path traversal)"""
     if not rel_path:
         return False
-    
-    norm_path = os.path.normpath(rel_path)
-    
-    if ".." in norm_path.split(os.sep):
-        abs_path = os.path.abspath(os.path.join(root_abs, norm_path))
-        return abs_path.startswith(root_abs)
-    
-    return True
+
+    raw = str(rel_path).strip()
+    if not raw:
+        return False
+
+    # Always reject absolute / drive-qualified paths in RW scripts.
+    if os.path.isabs(raw) or re.match(r"^[A-Za-z]:", raw):
+        return False
+
+    norm_path = os.path.normpath(raw)
+    root_norm = os.path.abspath(root_abs)
+    candidate_abs = os.path.abspath(os.path.join(root_norm, norm_path))
+    try:
+        return os.path.commonpath([root_norm, candidate_abs]) == root_norm
+    except Exception:
+        return False
 
 def is_path_allowed(rel_path: str, allow_prefixes: List[str], root_abs: str) -> bool:
     """Verifica se o caminho está na allowlist E é seguro"""
@@ -110,6 +119,66 @@ def is_path_allowed(rel_path: str, allow_prefixes: List[str], root_abs: str) -> 
             return True
     return False
 
+def utc_now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+def write_json(path: str, payload: Any) -> None:
+    write_text(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+
+def append_jsonl(path: str, payload: Any) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+def read_last_jsonl(path: str) -> Optional[dict]:
+    if not os.path.exists(path):
+        return None
+    last: Optional[dict] = None
+    with open(path, "r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                last = obj
+    return last
+
+def compute_change_id(root_abs: str, pipeline: dict, strict: bool, allow_prefixes: List[str]) -> str:
+    seed = {
+        "root": rel_norm(root_abs),
+        "pipeline": pipeline,
+        "strict": strict,
+        "allow": [rel_norm(p) for p in allow_prefixes],
+    }
+    raw = json.dumps(seed, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+def build_history_run_dir(runs_root_abs: str, run_id: str) -> str:
+    date_part = run_id[:8]
+    if len(date_part) == 8 and date_part.isdigit():
+        yyyy = date_part[0:4]
+        mm = date_part[4:6]
+        dd = date_part[6:8]
+    else:
+        now = time.gmtime()
+        yyyy = f"{now.tm_year:04d}"
+        mm = f"{now.tm_mon:02d}"
+        dd = f"{now.tm_mday:02d}"
+    return os.path.join(runs_root_abs, yyyy, mm, dd, run_id)
+
+def create_run_id(root_abs: str, pipeline: dict) -> str:
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    seed = (
+        f"{root_abs}|{os.getpid()}|{time.time_ns()}|{random.randint(0, 999999999)}|"
+        f"{json.dumps(pipeline, sort_keys=True, ensure_ascii=False)}"
+    )
+    suffix = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8]
+    return f"{stamp}_{suffix}"
+
 ###############################################################################
 # DSL Parsing
 ###############################################################################
@@ -123,6 +192,32 @@ class RWCommand:
     raw: str
     line_no: int
 
+def _split_rw_fields(line: str) -> List[str]:
+    """
+    Split RW fields by `|` supporting escaped separators:
+      - `\\|` keeps a literal pipe in the field
+      - `\\\\` keeps a literal backslash
+    """
+    out: List[str] = []
+    buf: List[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if ch == "\\" and i + 1 < n and line[i + 1] in ("|", "\\"):
+            buf.append(line[i + 1])
+            i += 2
+            continue
+        if ch == "|":
+            out.append("".join(buf).strip())
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    out.append("".join(buf).strip())
+    return out
+
 def parse_rw_line(line: str) -> Optional[Tuple[str, str, List[str], Dict[str, str]]]:
     """
     Legacy single-line parser:
@@ -133,11 +228,11 @@ def parse_rw_line(line: str) -> Optional[Tuple[str, str, List[str], Dict[str, st
     if not line or line.startswith("#"):
         return None
 
-    parts = [p.strip() for p in line.split("|")]
+    parts = _split_rw_fields(line)
     if len(parts) < 2:
         return None
 
-    op = parts[0].strip()
+    op = parts[0].strip().upper()
     file = parts[1].strip()
     rest = parts[2:]
 
@@ -158,29 +253,76 @@ def parse_rw_line(line: str) -> Optional[Tuple[str, str, List[str], Dict[str, st
 # Ops that may carry a multiline payload as their first arg
 MULTILINE_OPS = {
     "CREATE_FILE",
+    "WRITE_FILE",
+    "UPSERT_FILE",
     "REPLACE_BLOCK",
 }
 
 # Known ops for detecting the next command line
 KNOWN_OPS = {
     "CREATE_FILE",
+    "WRITE_FILE",
+    "UPSERT_FILE",
+    "PATCH_REGEX",
     "ASSERT_FILE_EXISTS",
     "ASSERT_FILE_NOT_EXISTS",
     "ASSERT_REGEX",
+    "ASSERT_NOT_REGEX",
+    "ASSERT_REGEX_COUNT",
+    "ASSERT_EXISTS",
+    "ASSERT_NOT_EXISTS",
+    "ASSERT_MATCH",
+    "ASSERT_NOT_MATCH",
+    "ASSERT_COUNT",
     "INSERT_AFTER_REGEX",
     "INSERT_BEFORE_REGEX",
     "REPLACE_REGEX",
+    "REPLACE_REGEX_FIRST",
     "DELETE_REGEX",
+    "DELETE_FILE",
+    "MOVE_FILE",
+    "COPY_FILE",
+    "REPLACE_BLOCK",
     "SCAN_FILE",
+    "SCAN",
 }
 
-_cmd_line_re = re.compile(r"^\s*([A-Z_]+)\s*\|")
+# Minimum number of args (after OP|file) required by each command.
+COMMAND_MIN_ARGS = {
+    "ASSERT_FILE_EXISTS": 0,
+    "ASSERT_FILE_NOT_EXISTS": 0,
+    "ASSERT_REGEX": 1,
+    "ASSERT_NOT_REGEX": 1,
+    "ASSERT_REGEX_COUNT": 2,
+    "ASSERT_EXISTS": 0,
+    "ASSERT_NOT_EXISTS": 0,
+    "ASSERT_MATCH": 1,
+    "ASSERT_NOT_MATCH": 1,
+    "ASSERT_COUNT": 2,
+    "SCAN_FILE": 1,
+    "SCAN": 1,
+    "CREATE_FILE": 0,
+    "WRITE_FILE": 1,
+    "UPSERT_FILE": 1,
+    "PATCH_REGEX": 1,
+    "INSERT_BEFORE_REGEX": 2,
+    "INSERT_AFTER_REGEX": 2,
+    "REPLACE_REGEX": 2,
+    "REPLACE_REGEX_FIRST": 2,
+    "DELETE_REGEX": 1,
+    "DELETE_FILE": 0,
+    "MOVE_FILE": 1,
+    "COPY_FILE": 1,
+    "REPLACE_BLOCK": 3,
+}
+
+_cmd_line_re = re.compile(r"^\s*([A-Za-z_]+)\s*\|")
 
 def _is_command_line(line: str) -> bool:
     m = _cmd_line_re.match(line)
     if not m:
         return False
-    return m.group(1) in KNOWN_OPS
+    return m.group(1).upper() in KNOWN_OPS
 
 
 def load_changes(root_abs: str, rw_path: str) -> List[RWCommand]:
@@ -216,38 +358,42 @@ def load_changes(root_abs: str, rw_path: str) -> List[RWCommand]:
             i += 1
             continue
 
-        # Multiline payload support (first arg)
+        # Multiline payload support with op-specific target arg.
         if op in MULTILINE_OPS and args:
-            first = args[0].strip()
+            payload_arg_index = 0 if op in ("CREATE_FILE", "WRITE_FILE", "UPSERT_FILE") else 2
+            if len(args) > payload_arg_index:
+                first = args[payload_arg_index].strip()
 
-            # Heredoc: <<TAG (default EOF)
-            if first.startswith("<<"):
-                tag = first[2:].strip() or "EOF"
+                # Heredoc: <<TAG (default EOF)
+                if first.startswith("<<"):
+                    tag = first[2:].strip() or "EOF"
+                    payload_lines = []
+                    i += 1
+                    while i < len(lines) and lines[i].strip() != tag:
+                        payload_lines.append(lines[i])
+                        i += 1
+                    if i < len(lines) and lines[i].strip() == tag:
+                        i += 1
+                    payload = "\n".join(payload_lines)
+                    args = list(args)
+                    args[payload_arg_index] = payload
+                    cmds.append(RWCommand(op=op, file=file, args=args, opts=opts, raw=raw, line_no=line_no))
+                    continue
+
+                # Implicit multiline: capture following non-command lines
                 payload_lines = []
-                i += 1
-                while i < len(lines) and lines[i].strip() != tag:
-                    payload_lines.append(lines[i])
-                    i += 1
-                if i < len(lines) and lines[i].strip() == tag:
-                    i += 1
-                payload = "\n".join(payload_lines)
-                args = [payload] + args[1:]
-                cmds.append(RWCommand(op=op, file=file, args=args, opts=opts, raw=raw, line_no=line_no))
-                continue
+                j = i + 1
+                while j < len(lines) and not _is_command_line(lines[j]):
+                    payload_lines.append(lines[j])
+                    j += 1
 
-            # Implicit multiline: capture following non-command lines
-            payload_lines = []
-            j = i + 1
-            while j < len(lines) and not _is_command_line(lines[j]):
-                payload_lines.append(lines[j])
-                j += 1
-
-            if payload_lines:
-                payload = (args[0] if args else "") + "\n" + "\n".join(payload_lines)
-                args = [payload] + args[1:]
-                cmds.append(RWCommand(op=op, file=file, args=args, opts=opts, raw=raw, line_no=line_no))
-                i = j
-                continue
+                if payload_lines:
+                    payload = (args[payload_arg_index] if len(args) > payload_arg_index else "") + "\n" + "\n".join(payload_lines)
+                    args = list(args)
+                    args[payload_arg_index] = payload
+                    cmds.append(RWCommand(op=op, file=file, args=args, opts=opts, raw=raw, line_no=line_no))
+                    i = j
+                    continue
 
         cmds.append(RWCommand(op=op, file=file, args=args, opts=opts, raw=raw, line_no=line_no))
         i += 1
@@ -334,21 +480,80 @@ def load_pipeline(root: str, pipeline_path: str, *, debug_pipeline: bool = False
 # Engine com timeout para regex (multiplataforma)
 ###############################################################################
 
+def _opt_get(opts: Dict[str, str], key: str):
+    if key in opts:
+        return opts.get(key)
+    key_lower = key.lower()
+    for k, v in opts.items():
+        if str(k).lower() == key_lower:
+            return v
+    return None
+
 def _opt_bool(opts: Dict[str, str], key: str, default: bool = False) -> bool:
-    v = opts.get(key)
+    v = _opt_get(opts, key)
     if v is None:
         return default
     v = v.strip().lower()
     return v in ("1", "true", "yes", "y", "on")
 
 def _opt_int(opts: Dict[str, str], key: str, default: int) -> int:
-    v = opts.get(key)
+    v = _opt_get(opts, key)
     if v is None:
         return default
     try:
         return int(v)
     except Exception:
         return default
+
+def _canonicalize_command(cmd: RWCommand) -> Optional[str]:
+    """Normalize command aliases to canonical runtime commands."""
+    op = cmd.op
+
+    alias_map = {
+        "ASSERT_EXISTS": "ASSERT_FILE_EXISTS",
+        "ASSERT_NOT_EXISTS": "ASSERT_FILE_NOT_EXISTS",
+        "ASSERT_MATCH": "ASSERT_REGEX",
+        "ASSERT_NOT_MATCH": "ASSERT_NOT_REGEX",
+        "ASSERT_COUNT": "ASSERT_REGEX_COUNT",
+        "SCAN": "SCAN_FILE",
+    }
+    if op in alias_map:
+        cmd.op = alias_map[op]
+        return None
+
+    if op == "PATCH_REGEX":
+        mode = str(_opt_get(cmd.opts, "MODE") or "replace").strip().lower()
+        first = _opt_bool(cmd.opts, "FIRST", False)
+        pattern = cmd.args[0] if len(cmd.args) >= 1 else ""
+        repl = cmd.args[1] if len(cmd.args) >= 2 else ""
+
+        if mode == "replace":
+            if len(cmd.args) < 2:
+                return "INVALID_ARGS PATCH_REGEX MODE=replace requires pattern and replacement"
+            cmd.op = "REPLACE_REGEX_FIRST" if first else "REPLACE_REGEX"
+            cmd.args = [pattern, repl]
+            return None
+        if mode == "insert_before":
+            if len(cmd.args) < 2:
+                return "INVALID_ARGS PATCH_REGEX MODE=insert_before requires regex and insert text"
+            cmd.op = "INSERT_BEFORE_REGEX"
+            cmd.args = [pattern, repl]
+            return None
+        if mode == "insert_after":
+            if len(cmd.args) < 2:
+                return "INVALID_ARGS PATCH_REGEX MODE=insert_after requires regex and insert text"
+            cmd.op = "INSERT_AFTER_REGEX"
+            cmd.args = [pattern, repl]
+            return None
+        if mode == "delete":
+            if len(cmd.args) < 1:
+                return "INVALID_ARGS PATCH_REGEX MODE=delete requires regex"
+            cmd.op = "DELETE_REGEX"
+            cmd.args = [pattern]
+            return None
+        return f"INVALID_ARGS unknown PATCH_REGEX MODE '{mode}'"
+
+    return None
 
 def _json_unquote(s: str) -> str:
     s = s.strip()
@@ -541,6 +746,7 @@ def run_pipeline(
     max_total_write_bytes: int,
     workers: int,
     verbose: bool = False,
+    pipeline_ref: str = "",
 ) -> dict:
     t0 = time.time()
 
@@ -558,11 +764,12 @@ def run_pipeline(
         },
         "steps": [],
         "errors": [],
-        "rollback": None,
+        "rollback": {"attempted": False, "files_restored": [], "files_removed": []},
         "rejects": [],
         "scans": [],
         "summary_path": None,
         "duration_ms": None,
+        "history": {"enabled": False},
     }
 
     report["pipeline"] = {
@@ -570,25 +777,136 @@ def run_pipeline(
     }
 
     vfs: Dict[str, str] = {}
+    deleted_files: set = set()
     changed_files: Dict[str, dict] = {}
     wrote_bytes_total = 0
     touched = 0
 
-    backup_paths: List[Tuple[str, str, bool]] = []
+    backup_paths: List[Tuple[str, Optional[str], bool, str]] = []
     new_files: List[str] = []
+    history_backups: Dict[str, str] = {}
+
+    history_ctx: Optional[dict] = None
+    if backup and not plan_only:
+        history_root_abs = os.path.join(root_abs, "data", "history")
+        runs_root_abs = os.path.join(history_root_abs, "runs")
+        index_root_abs = os.path.join(history_root_abs, "index")
+        runs_index_abs = os.path.join(index_root_abs, "runs.jsonl")
+        by_path_index_abs = os.path.join(index_root_abs, "by-path.jsonl")
+
+        parent_run_id = None
+        last_run = read_last_jsonl(runs_index_abs)
+        if isinstance(last_run, dict):
+            parent_run_id = last_run.get("run_id")
+
+        run_id = ""
+        run_dir_abs = ""
+        for _attempt in range(50):
+            candidate = create_run_id(root_abs, pipeline)
+            candidate_dir = build_history_run_dir(runs_root_abs, candidate)
+            if not os.path.exists(candidate_dir):
+                run_id = candidate
+                run_dir_abs = candidate_dir
+                break
+            time.sleep(0.005)
+
+        if not run_id or not run_dir_abs:
+            report["errors"].append({"error": "FAILED_TO_CREATE_HISTORY_RUN_ID"})
+        else:
+            before_dir_abs = os.path.join(run_dir_abs, "before")
+            patches_dir_abs = os.path.join(run_dir_abs, "patches")
+            artifacts_dir_abs = os.path.join(run_dir_abs, "artifacts")
+            os.makedirs(before_dir_abs, exist_ok=True)
+            os.makedirs(patches_dir_abs, exist_ok=True)
+            os.makedirs(artifacts_dir_abs, exist_ok=True)
+
+            change_id = compute_change_id(root_abs, pipeline, strict, allow_prefixes)
+            started_at = utc_now_iso()
+            manifest_abs = os.path.join(run_dir_abs, "manifest.json")
+            manifest_bootstrap = {
+                "schema_version": 1,
+                "run_id": run_id,
+                "change_id": change_id,
+                "parent_run_id": parent_run_id,
+                "status": "RUNNING",
+                "mode": "apply",
+                "started_at": started_at,
+                "finished_at": None,
+                "root": rel_norm(root_abs),
+                "inputs": {
+                    "pipeline": pipeline_ref or "",
+                    "steps": [{"name": s.get("name"), "scripts": list(s.get("scripts", []))} for s in pipeline.get("steps", [])],
+                    "flags": {
+                        "strict": strict,
+                        "backup": backup,
+                        "rollback_on_fail": rollback_on_fail,
+                    },
+                    "limits": {
+                        "max_files": max_files,
+                        "max_total_write_bytes": max_total_write_bytes,
+                        "allowlist_prefixes": allow_prefixes,
+                    },
+                },
+                "stats": {
+                    "files_changed": 0,
+                    "errors_count": 0,
+                    "rejects_count": 0,
+                    "bytes_written": 0,
+                    "duration_ms": 0,
+                },
+                "files": [],
+                "artifacts": {},
+                "rollback": {"attempted": False, "files_restored": [], "files_removed": []},
+                "errors": [],
+                "rejects": [],
+                "pinned": False,
+            }
+            write_json(manifest_abs, manifest_bootstrap)
+
+            run_rel = rel_norm(os.path.relpath(run_dir_abs, root_abs))
+            manifest_rel = rel_norm(os.path.relpath(manifest_abs, root_abs))
+            history_ctx = {
+                "run_id": run_id,
+                "change_id": change_id,
+                "parent_run_id": parent_run_id,
+                "started_at": started_at,
+                "run_dir_abs": run_dir_abs,
+                "run_rel": run_rel,
+                "before_dir_abs": before_dir_abs,
+                "patches_dir_abs": patches_dir_abs,
+                "artifacts_dir_abs": artifacts_dir_abs,
+                "manifest_abs": manifest_abs,
+                "manifest_rel": manifest_rel,
+                "runs_index_abs": runs_index_abs,
+                "by_path_index_abs": by_path_index_abs,
+            }
+
+            report["history"] = {
+                "enabled": True,
+                "run_id": run_id,
+                "change_id": change_id,
+                "run_path": run_rel,
+                "manifest_path": manifest_rel,
+            }
 
     def _get_file_text(rel_path: str) -> Optional[str]:
         rel_path = rel_norm(rel_path)
+        if rel_path in deleted_files:
+            return None
         if rel_path in vfs:
             return vfs[rel_path]
         abs_path = os.path.join(root_abs, rel_path)
         if not os.path.exists(abs_path):
+            return None
+        if os.path.isdir(abs_path):
             return None
         return read_text(abs_path)
 
     def _set_file_text(rel_path: str, text: str, is_new: bool = False) -> None:
         nonlocal wrote_bytes_total, touched
         rel_path = rel_norm(rel_path)
+        if rel_path in deleted_files:
+            deleted_files.discard(rel_path)
         old = _get_file_text(rel_path)
         if old is None:
             old = ""
@@ -606,28 +924,71 @@ def run_pipeline(
             "bytes_before": len(old.encode("utf-8")),
             "sha256_before": sha256_text(old) if old else None,
             "is_new": is_new,
+            "action": "ADD" if is_new else "MOD",
         })
         changed_files[rel_path].update({
             "bytes_after": len(text.encode("utf-8")),
             "sha256_after": sha256_text(text),
+            "action": "ADD" if is_new else "MOD",
         })
         touched += 1
 
+    def _delete_file_text(rel_path: str) -> int:
+        nonlocal touched
+        rel_path = rel_norm(rel_path)
+        if not rel_path:
+            return 0
+
+        cur = _get_file_text(rel_path)
+        abs_path = os.path.join(root_abs, rel_path)
+        if cur is None and not os.path.exists(abs_path):
+            return 0
+        if os.path.isdir(abs_path) and rel_path not in vfs:
+            return -2
+
+        before = cur if cur is not None else ""
+        vfs.pop(rel_path, None)
+        deleted_files.add(rel_path)
+        changed_files.setdefault(rel_path, {
+            "file": rel_path,
+            "bytes_before": len(before.encode("utf-8")),
+            "sha256_before": sha256_text(before) if before else None,
+            "is_new": False,
+            "action": "DEL",
+        })
+        changed_files[rel_path].update({
+            "bytes_after": 0,
+            "sha256_after": None,
+            "is_new": False,
+            "action": "DEL",
+        })
+        touched += 1
+        return 1
+
     def _write_file(rel_path: str, text: str, is_new: bool = False) -> None:
-        # NOTE: wrote_bytes_total is accounted in _set_file_text (delta before/after).
+        # Write limit is evaluated from final in-memory file content before apply.
         rel_path = rel_norm(rel_path)
         if not rel_path:
             return
         abs_path = os.path.join(root_abs, rel_path)
         os.makedirs(os.path.dirname(abs_path) or ".", exist_ok=True)
 
-        # Backup (legacy behavior)
+        # Backup snapshot before overwrite (history mode).
         if backup and os.path.exists(abs_path) and not is_new:
-            bak = abs_path + ".bak"
-            write_text(bak, read_text(abs_path))
-            backup_paths.append((abs_path, bak, False))
-            if verbose:
-                print(f"[VERBOSE] Backup criado: {bak}")
+            if history_ctx is not None:
+                if rel_path not in history_backups:
+                    bak_abs = os.path.join(history_ctx["before_dir_abs"], rel_path.replace("/", os.sep) + ".bak")
+                    write_text(bak_abs, read_text(abs_path))
+                    backup_paths.append((abs_path, bak_abs, False, rel_path))
+                    history_backups[rel_path] = rel_norm(os.path.relpath(bak_abs, history_ctx["run_dir_abs"]))
+                    if verbose:
+                        print(f"[VERBOSE] Backup criado (history): {bak_abs}")
+            else:
+                bak = abs_path + ".bak"
+                write_text(bak, read_text(abs_path))
+                backup_paths.append((abs_path, bak, False, rel_path))
+                if verbose:
+                    print(f"[VERBOSE] Backup criado: {bak}")
 
         # Atomic write: write to temp then replace
         tmp_path = f"{abs_path}.svtmp.{os.getpid()}.{int(time.time()*1000)}"
@@ -636,23 +997,50 @@ def run_pipeline(
         os.replace(tmp_path, abs_path)
 
         if is_new:
-            backup_paths.append((abs_path, None, True))
+            backup_paths.append((abs_path, None, True, rel_path))
             if verbose:
                 print(f"[VERBOSE] Arquivo criado: {abs_path}")
 
+    def _delete_file(rel_path: str) -> None:
+        rel_path = rel_norm(rel_path)
+        if not rel_path:
+            return
+        abs_path = os.path.join(root_abs, rel_path)
+        if not os.path.exists(abs_path):
+            return
+
+        if backup and os.path.isfile(abs_path):
+            if history_ctx is not None:
+                if rel_path not in history_backups:
+                    bak_abs = os.path.join(history_ctx["before_dir_abs"], rel_path.replace("/", os.sep) + ".bak")
+                    write_text(bak_abs, read_text(abs_path))
+                    backup_paths.append((abs_path, bak_abs, False, rel_path))
+                    history_backups[rel_path] = rel_norm(os.path.relpath(bak_abs, history_ctx["run_dir_abs"]))
+                    if verbose:
+                        print(f"[VERBOSE] Backup criado (history): {bak_abs}")
+            else:
+                bak = abs_path + ".bak"
+                write_text(bak, read_text(abs_path))
+                backup_paths.append((abs_path, bak, False, rel_path))
+                if verbose:
+                    print(f"[VERBOSE] Backup criado: {bak}")
+
+        if os.path.isfile(abs_path):
+            os.remove(abs_path)
+
     def _rollback() -> dict:
         rb = {"attempted": True, "files_restored": [], "files_removed": []}
-        for orig, bak, is_new in reversed(backup_paths):
+        for orig, bak, is_new, rel_path in reversed(backup_paths):
             try:
                 if is_new:
                     if os.path.exists(orig):
                         os.remove(orig)
-                        rb["files_removed"].append(rel_norm(orig))
+                        rb["files_removed"].append(rel_path)
                         if verbose:
                             print(f"[VERBOSE] Rollback: removido arquivo novo {orig}")
                 elif bak and os.path.exists(bak):
                     write_text(orig, read_text(bak))
-                    rb["files_restored"].append(rel_norm(orig))
+                    rb["files_restored"].append(rel_path)
                     if verbose:
                         print(f"[VERBOSE] Rollback: restaurado {orig} de {bak}")
             except Exception as e:
@@ -693,6 +1081,21 @@ def run_pipeline(
 
             per_file_ops: Dict[str, dict] = {}
 
+            def ensure_file_entry(rel_path: str) -> dict:
+                per_file_ops.setdefault(rel_path, {
+                    "file": rel_path,
+                    "changed": False,
+                    "ops": [],
+                    "diff": None,
+                    "bytes_before": None,
+                    "bytes_after": None,
+                    "sha256_before": None,
+                    "sha256_after": None,
+                    "is_new": False,
+                    "is_deleted": False,
+                })
+                return per_file_ops[rel_path]
+
             for cmd in cmds:
                 rel_file = rel_norm(cmd.file)
 
@@ -710,22 +1113,12 @@ def run_pipeline(
                     step_errors.append(err)
                     continue
 
-                per_file_ops.setdefault(rel_file, {
-                    "file": rel_file,
-                    "changed": False,
-                    "ops": [],
-                    "diff": None,
-                    "bytes_before": None,
-                    "bytes_after": None,
-                    "sha256_before": None,
-                    "sha256_after": None,
-                    "is_new": False,
-                })
-                file_entry = per_file_ops[rel_file]
+                file_entry = ensure_file_entry(rel_file)
 
                 abs_path = os.path.join(root_abs, rel_file)
-                file_exists = os.path.exists(abs_path)
-                is_dir = os.path.isdir(abs_path)
+                exists_in_vfs = rel_file in vfs and rel_file not in deleted_files
+                file_exists = exists_in_vfs or (os.path.exists(abs_path) and rel_file not in deleted_files)
+                is_dir = os.path.isdir(abs_path) and not exists_in_vfs and rel_file not in deleted_files
                 cur_text = None if is_dir else _get_file_text(rel_file)
 
                 def op_record(changed: int, **extra):
@@ -733,8 +1126,40 @@ def run_pipeline(
                     rec.update(extra)
                     file_entry["ops"].append(rec)
 
+                canonical_error = _canonicalize_command(cmd)
+                if canonical_error:
+                    err = {
+                        "step": step_name,
+                        "script": sp,
+                        "file": rel_file,
+                        "line": cmd.line_no,
+                        "op": cmd.op,
+                        "error": canonical_error,
+                        "raw": cmd.raw,
+                    }
+                    script_entry["errors"].append(err)
+                    step_errors.append(err)
+                    op_record(0)
+                    continue
+
+                min_args = COMMAND_MIN_ARGS.get(cmd.op)
+                if min_args is not None and len(cmd.args) < min_args:
+                    err = {
+                        "step": step_name,
+                        "script": sp,
+                        "file": rel_file,
+                        "line": cmd.line_no,
+                        "op": cmd.op,
+                        "error": f"INVALID_ARGS expected>={min_args} got={len(cmd.args)}",
+                        "raw": cmd.raw,
+                    }
+                    script_entry["errors"].append(err)
+                    step_errors.append(err)
+                    op_record(0)
+                    continue
+
                 if cmd.op == "ASSERT_FILE_EXISTS":
-                    ok = file_exists or (rel_file in vfs)
+                    ok = file_exists
                     if not ok:
                         err = {
                             "step": step_name,
@@ -751,7 +1176,7 @@ def run_pipeline(
                     continue
 
                 if cmd.op == "ASSERT_FILE_NOT_EXISTS":
-                    ok = (not file_exists) and (rel_file not in vfs)
+                    ok = not file_exists
                     if not ok:
                         err = {
                             "step": step_name,
@@ -921,7 +1346,22 @@ def run_pipeline(
                         op_record(0)
                         continue
                     regex = cmd.args[0] if len(cmd.args) >= 1 else ""
-                    expected = int(cmd.args[1]) if len(cmd.args) >= 2 else 0
+                    try:
+                        expected = int(cmd.args[1]) if len(cmd.args) >= 2 else 0
+                    except Exception:
+                        err = {
+                            "step": step_name,
+                            "script": sp,
+                            "file": rel_file,
+                            "line": cmd.line_no,
+                            "op": cmd.op,
+                            "error": "INVALID_ARGS expected integer count",
+                            "raw": cmd.raw,
+                        }
+                        script_entry["errors"].append(err)
+                        step_errors.append(err)
+                        op_record(0)
+                        continue
                     try:
                         matches = _safe_regex_finditer(_normalize_regex_pattern(regex), cur_text)
                         found = len(matches)
@@ -968,6 +1408,227 @@ def run_pipeline(
                         op_record(0)
                     continue
 
+                if cmd.op == "WRITE_FILE":
+                    if cur_text is None:
+                        err = {
+                            "step": step_name,
+                            "script": sp,
+                            "file": rel_file,
+                            "line": cmd.line_no,
+                            "op": cmd.op,
+                            "error": "FILE_NOT_FOUND",
+                            "raw": cmd.raw,
+                        }
+                        script_entry["errors"].append(err)
+                        step_errors.append(err)
+                        op_record(0)
+                        continue
+                    content = _json_unquote(cmd.args[0]) if cmd.args else ""
+                    changed = 1 if cur_text != content else 0
+                    if changed:
+                        _set_file_text(rel_file, content, is_new=False)
+                        file_entry["changed"] = True
+                    op_record(changed)
+                    continue
+
+                if cmd.op == "UPSERT_FILE":
+                    content = _json_unquote(cmd.args[0]) if cmd.args else ""
+                    is_new_file = cur_text is None
+                    changed = 1 if (cur_text or "") != content else 0
+                    if changed:
+                        _set_file_text(rel_file, content, is_new=is_new_file)
+                        file_entry["changed"] = True
+                        if is_new_file:
+                            file_entry["is_new"] = True
+                    op_record(changed)
+                    continue
+
+                allow_noop = _opt_bool(cmd.opts, "ALLOW_NOOP", False)
+
+                if cmd.op == "DELETE_FILE":
+                    changed = _delete_file_text(rel_file)
+                    if changed == -2:
+                        err = {
+                            "step": step_name,
+                            "script": sp,
+                            "file": rel_file,
+                            "line": cmd.line_no,
+                            "op": cmd.op,
+                            "error": "DIRECTORY_NOT_SUPPORTED",
+                            "raw": cmd.raw,
+                        }
+                        script_entry["errors"].append(err)
+                        step_errors.append(err)
+                        op_record(0)
+                        continue
+                    if changed == 0 and strict and not allow_noop:
+                        err = {
+                            "step": step_name,
+                            "script": sp,
+                            "file": rel_file,
+                            "line": cmd.line_no,
+                            "op": cmd.op,
+                            "error": "STRICT_FAIL_EXPECTED_CHANGE",
+                            "raw": cmd.raw,
+                        }
+                        script_entry["errors"].append(err)
+                        step_errors.append(err)
+                    if changed == 1:
+                        file_entry["changed"] = True
+                        file_entry["is_deleted"] = True
+                    op_record(1 if changed == 1 else 0)
+                    continue
+
+                if cmd.op in ("MOVE_FILE", "COPY_FILE"):
+                    dst_rel = rel_norm(cmd.args[0]) if cmd.args else ""
+                    if not dst_rel:
+                        err = {
+                            "step": step_name,
+                            "script": sp,
+                            "file": rel_file,
+                            "line": cmd.line_no,
+                            "op": cmd.op,
+                            "error": "INVALID_ARGS missing destination path",
+                            "raw": cmd.raw,
+                        }
+                        script_entry["errors"].append(err)
+                        step_errors.append(err)
+                        op_record(0)
+                        continue
+                    if not is_path_allowed(dst_rel, allow_prefixes, root_abs):
+                        err = {
+                            "step": step_name,
+                            "script": sp,
+                            "file": dst_rel,
+                            "line": cmd.line_no,
+                            "op": cmd.op,
+                            "error": "PATH_NOT_ALLOWED_OR_UNSAFE",
+                            "raw": cmd.raw,
+                        }
+                        script_entry["errors"].append(err)
+                        step_errors.append(err)
+                        op_record(0)
+                        continue
+
+                    dst_entry = ensure_file_entry(dst_rel)
+                    dst_abs = os.path.join(root_abs, dst_rel)
+                    dst_exists_in_vfs = dst_rel in vfs and dst_rel not in deleted_files
+                    dst_is_dir = os.path.isdir(dst_abs) and not dst_exists_in_vfs and dst_rel not in deleted_files
+                    dst_text = None if dst_is_dir else _get_file_text(dst_rel)
+
+                    if cur_text is None:
+                        if allow_noop:
+                            op_record(0)
+                            continue
+                        err = {
+                            "step": step_name,
+                            "script": sp,
+                            "file": rel_file,
+                            "line": cmd.line_no,
+                            "op": cmd.op,
+                            "error": "FILE_NOT_FOUND",
+                            "raw": cmd.raw,
+                        }
+                        script_entry["errors"].append(err)
+                        step_errors.append(err)
+                        op_record(0)
+                        continue
+
+                    if is_dir:
+                        err = {
+                            "step": step_name,
+                            "script": sp,
+                            "file": rel_file,
+                            "line": cmd.line_no,
+                            "op": cmd.op,
+                            "error": "DIRECTORY_NOT_SUPPORTED",
+                            "raw": cmd.raw,
+                        }
+                        script_entry["errors"].append(err)
+                        step_errors.append(err)
+                        op_record(0)
+                        continue
+
+                    if dst_is_dir:
+                        err = {
+                            "step": step_name,
+                            "script": sp,
+                            "file": dst_rel,
+                            "line": cmd.line_no,
+                            "op": cmd.op,
+                            "error": "DESTINATION_IS_DIRECTORY",
+                            "raw": cmd.raw,
+                        }
+                        script_entry["errors"].append(err)
+                        step_errors.append(err)
+                        op_record(0)
+                        continue
+
+                    overwrite = _opt_bool(cmd.opts, "OVERWRITE", False)
+                    if dst_rel != rel_file and dst_text is not None and not overwrite:
+                        err = {
+                            "step": step_name,
+                            "script": sp,
+                            "file": dst_rel,
+                            "line": cmd.line_no,
+                            "op": cmd.op,
+                            "error": "DESTINATION_EXISTS",
+                            "raw": cmd.raw,
+                        }
+                        script_entry["errors"].append(err)
+                        step_errors.append(err)
+                        op_record(0)
+                        continue
+
+                    changed = 0
+                    if dst_rel != rel_file:
+                        dst_was_new = dst_text is None
+                        if dst_text != cur_text:
+                            _set_file_text(dst_rel, cur_text, is_new=dst_was_new)
+                            dst_entry["changed"] = True
+                            if dst_was_new:
+                                dst_entry["is_new"] = True
+                            changed = 1
+
+                    if cmd.op == "MOVE_FILE":
+                        deleted = _delete_file_text(rel_file)
+                        if deleted == -2:
+                            err = {
+                                "step": step_name,
+                                "script": sp,
+                                "file": rel_file,
+                                "line": cmd.line_no,
+                                "op": cmd.op,
+                                "error": "DIRECTORY_NOT_SUPPORTED",
+                                "raw": cmd.raw,
+                            }
+                            script_entry["errors"].append(err)
+                            step_errors.append(err)
+                            op_record(0)
+                            continue
+                        if deleted == 1:
+                            file_entry["changed"] = True
+                            file_entry["is_deleted"] = True
+                            changed = 1
+
+                    if strict and changed == 0 and not allow_noop:
+                        err = {
+                            "step": step_name,
+                            "script": sp,
+                            "file": rel_file,
+                            "line": cmd.line_no,
+                            "op": cmd.op,
+                            "error": "STRICT_FAIL_EXPECTED_CHANGE",
+                            "raw": cmd.raw,
+                        }
+                        script_entry["errors"].append(err)
+                        step_errors.append(err)
+
+                    op_record(changed, to=dst_rel)
+                    if dst_rel in per_file_ops:
+                        per_file_ops[dst_rel]["ops"].append({"line": cmd.line_no, "op": cmd.op, "changed": changed, "from": rel_file})
+                    continue
+
                 if cur_text is None:
                     err = {
                         "step": step_name,
@@ -982,8 +1643,6 @@ def run_pipeline(
                     step_errors.append(err)
                     op_record(0)
                     continue
-
-                allow_noop = _opt_bool(cmd.opts, "ALLOW_NOOP", False)
 
                 if cmd.op == "INSERT_BEFORE_REGEX":
                     regex = cmd.args[0] if len(cmd.args) >= 1 else ""
@@ -1341,7 +2000,7 @@ def run_pipeline(
                     fe["bytes_before"] = len(before_text.encode("utf-8"))
                     fe["bytes_after"] = len(after_text.encode("utf-8"))
                     fe["sha256_before"] = sha256_text(before_text) if before_text else None
-                    fe["sha256_after"] = sha256_text(after_text)
+                    fe["sha256_after"] = None if fe.get("is_deleted") else sha256_text(after_text)
                 else:
                     fe["bytes_before"] = len(before_text.encode("utf-8")) if os.path.exists(abs_path) else 0
                     fe["bytes_after"] = fe["bytes_before"]
@@ -1358,6 +2017,11 @@ def run_pipeline(
             break
 
     if not plan_only and not report["errors"]:
+        wrote_bytes_total = 0
+        for rel_path in changed_files.keys():
+            text = _get_file_text(rel_path) or ""
+            wrote_bytes_total += len(text.encode("utf-8"))
+
         if len(changed_files) > max_files:
             report["errors"].append({"error": "LIMIT_MAX_FILES_EXCEEDED", "max_files": max_files, "found": len(changed_files)})
         if wrote_bytes_total > max_total_write_bytes:
@@ -1368,8 +2032,11 @@ def run_pipeline(
                 report["rollback"] = _rollback()
         else:
             for rel_path, meta in changed_files.items():
-                text = _get_file_text(rel_path) or ""
-                _write_file(rel_path, text, meta.get("is_new", False))
+                if meta.get("action") == "DEL":
+                    _delete_file(rel_path)
+                else:
+                    text = _get_file_text(rel_path) or ""
+                    _write_file(rel_path, text, meta.get("is_new", False))
 
     summary_dir = os.path.join(root_abs, "data", "index")
     os.makedirs(summary_dir, exist_ok=True)
@@ -1405,7 +2072,12 @@ def run_pipeline(
             for fe in sc.get("files", []):
                 if fe.get("diff"):
                     diffs_found = True
-                    md.append(f"### {fe['file']} {'(NEW)' if fe.get('is_new') else ''}")
+                    suffix = ""
+                    if fe.get("is_deleted"):
+                        suffix = "(DEL)"
+                    elif fe.get("is_new"):
+                        suffix = "(NEW)"
+                    md.append(f"### {fe['file']} {suffix}")
                     md.append("")
                     md.append("```diff")
                     md.append(fe["diff"].rstrip("\n"))
@@ -1417,6 +2089,147 @@ def run_pipeline(
     
     write_text(summary_path, "\n".join(md).rstrip("\n") + "\n")
     report["duration_ms"] = int((time.time() - t0) * 1000)
+
+    if history_ctx is not None:
+        history_status = "OK"
+        if report["errors"]:
+            if report.get("rollback", {}).get("attempted"):
+                history_status = "FAILED_ROLLED_BACK"
+            else:
+                history_status = "FAILED_NO_ROLLBACK"
+
+        files_for_manifest: List[dict] = []
+        files_for_by_path: List[dict] = []
+        seen_paths: set = set()
+        for step in report["steps"]:
+            for sc in step.get("scripts", []):
+                for fe in sc.get("files", []):
+                    if not fe.get("changed"):
+                        continue
+                    rel_file = rel_norm(fe.get("file", ""))
+                    if not rel_file or rel_file in seen_paths:
+                        continue
+                    seen_paths.add(rel_file)
+
+                    is_new = bool(fe.get("is_new"))
+                    is_deleted = bool(fe.get("is_deleted"))
+                    action = "DEL" if is_deleted else ("ADD" if is_new else "MOD")
+                    diff_rel = None
+                    diff_text = fe.get("diff")
+                    if diff_text:
+                        diff_abs = os.path.join(history_ctx["patches_dir_abs"], rel_file.replace("/", os.sep) + ".diff")
+                        write_text(diff_abs, diff_text if diff_text.endswith("\n") else diff_text + "\n")
+                        diff_rel = rel_norm(os.path.relpath(diff_abs, history_ctx["run_dir_abs"]))
+
+                    file_entry = {
+                        "path": rel_file,
+                        "action": action,
+                        "is_new": is_new,
+                        "is_deleted": is_deleted,
+                        "sha256_before": fe.get("sha256_before"),
+                        "sha256_after": fe.get("sha256_after"),
+                        "bytes_before": int(fe.get("bytes_before") or 0),
+                        "bytes_after": int(fe.get("bytes_after") or 0),
+                        "backup_path": history_backups.get(rel_file),
+                        "diff_path": diff_rel,
+                    }
+                    files_for_manifest.append(file_entry)
+                    files_for_by_path.append(file_entry)
+
+        artifacts_report_rel = "artifacts/sv-report.json"
+        artifacts_summary_rel = "artifacts/changes-summary.md"
+        history_report_abs = os.path.join(history_ctx["artifacts_dir_abs"], "sv-report.json")
+        history_summary_abs = os.path.join(history_ctx["artifacts_dir_abs"], "changes-summary.md")
+
+        history_report_payload = dict(report)
+        history_report_payload["history"] = dict(report.get("history", {}))
+        history_report_payload["history"]["status"] = history_status
+        history_report_payload["history"]["artifacts"] = {
+            "report_path": artifacts_report_rel,
+            "summary_path": artifacts_summary_rel,
+        }
+
+        write_json(history_report_abs, history_report_payload)
+        write_text(history_summary_abs, read_text(summary_path))
+
+        finished_at = utc_now_iso()
+        manifest_payload = {
+            "schema_version": 1,
+            "run_id": history_ctx["run_id"],
+            "change_id": history_ctx["change_id"],
+            "parent_run_id": history_ctx["parent_run_id"],
+            "status": history_status,
+            "mode": "apply",
+            "started_at": history_ctx["started_at"],
+            "finished_at": finished_at,
+            "root": rel_norm(root_abs),
+            "inputs": {
+                "pipeline": pipeline_ref or "",
+                "steps": [{"name": s.get("name"), "scripts": list(s.get("scripts", []))} for s in pipeline.get("steps", [])],
+                "flags": {
+                    "strict": strict,
+                    "backup": backup,
+                    "rollback_on_fail": rollback_on_fail,
+                },
+                "limits": {
+                    "max_files": max_files,
+                    "max_total_write_bytes": max_total_write_bytes,
+                    "allowlist_prefixes": allow_prefixes,
+                },
+            },
+            "stats": {
+                "files_changed": len(files_for_manifest),
+                "errors_count": len(report.get("errors", [])),
+                "rejects_count": len(report.get("rejects", [])),
+                "bytes_written": sum(int(f.get("bytes_after") or 0) for f in files_for_manifest),
+                "duration_ms": report["duration_ms"],
+            },
+            "files": sorted(files_for_manifest, key=lambda x: x["path"]),
+            "artifacts": {
+                "report_path": artifacts_report_rel,
+                "summary_path": artifacts_summary_rel,
+            },
+            "rollback": report.get("rollback", {"attempted": False, "files_restored": [], "files_removed": []}),
+            "errors": report.get("errors", []),
+            "rejects": report.get("rejects", []),
+            "pinned": False,
+        }
+        write_json(history_ctx["manifest_abs"], manifest_payload)
+
+        run_record = {
+            "run_id": history_ctx["run_id"],
+            "change_id": history_ctx["change_id"],
+            "parent_run_id": history_ctx["parent_run_id"],
+            "status": history_status,
+            "applied_at": finished_at,
+            "root": rel_norm(root_abs),
+            "files_changed": len(files_for_manifest),
+            "errors_count": len(report.get("errors", [])),
+            "rejects_count": len(report.get("rejects", [])),
+            "run_path": history_ctx["run_rel"],
+        }
+        append_jsonl(history_ctx["runs_index_abs"], run_record)
+
+        if history_status == "OK":
+            for item in sorted(files_for_by_path, key=lambda x: x["path"]):
+                append_jsonl(history_ctx["by_path_index_abs"], {
+                    "path": item["path"],
+                    "run_id": history_ctx["run_id"],
+                    "change_id": history_ctx["change_id"],
+                    "action": item["action"],
+                    "sha256_before": item.get("sha256_before"),
+                    "sha256_after": item.get("sha256_after"),
+                    "bytes_before": item.get("bytes_before", 0),
+                    "bytes_after": item.get("bytes_after", 0),
+                    "applied_at": finished_at,
+                    "status": history_status,
+                })
+
+        report["history"]["status"] = history_status
+        report["history"]["artifacts"] = {
+            "report_path": rel_norm(os.path.relpath(history_report_abs, root_abs)),
+            "summary_path": rel_norm(os.path.relpath(history_summary_abs, root_abs)),
+        }
     
     return report
 
@@ -1432,7 +2245,7 @@ def main():
     ap.add_argument("--plan", action="store_true", help="Plan only (no writes)")
     ap.add_argument("--apply", action="store_true", help="Apply changes (write to disk)")
     ap.add_argument("--strict", action="store_true", help="Strict mode (no-op mutations fail unless ALLOW_NOOP=1)")
-    ap.add_argument("--backup", action="store_true", help="Write .bak backups on apply")
+    ap.add_argument("--backup", action="store_true", help="Write history backups on apply (data/history/runs/<run_id>/before/*.bak)")
     ap.add_argument("--rollback-on-fail", action="store_true", help="Attempt rollback on failure (apply only)")
     ap.add_argument("--workers", type=int, default=8, help="Workers (reserved)")
     ap.add_argument("--max-files", type=int, default=500, help="Limit changed files")
@@ -1475,6 +2288,7 @@ def main():
         max_total_write_bytes=int(args.max_total_write_bytes),
         workers=int(args.workers),
         verbose=args.verbose,
+        pipeline_ref=args.pipeline,
     )
 
     # CORREÇÃO: Garantir que rollback existe mesmo se não for usado

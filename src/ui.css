@@ -1680,3 +1680,108 @@ body.has-apply-diff .applyDiffModal{
   right:5px;
   border-radius:4px;
 }
+
+/* =========================================================
+   File Viewer editor UX add-ons: line numbers + find bar
+   (visual + local editor chrome only)
+   ========================================================= */
+.fvEditWrap{
+  position:relative;
+  height:100%;
+  display:none;
+}
+
+.fvEditMain{
+  display:flex;
+  align-items:stretch;
+  height:100%;
+  min-height:0;
+}
+
+.fvGutter{
+  width:52px;
+  flex:0 0 52px;
+  border-right:1px solid rgba(240,246,252,.10);
+  background:rgba(0,0,0,.16);
+  color:var(--muted);
+  overflow:hidden;
+  user-select:none;
+}
+
+.fvGutter pre{
+  margin:0;
+  padding:12px 8px 12px 0;
+  text-align:right;
+  font-family:var(--mono);
+  font-size:12.5px;
+  line-height:1.45;
+  white-space:pre;
+}
+
+.fvEditWrap .fvEditor{
+  flex:1 1 auto;
+  min-width:0;
+  min-height:0;
+}
+
+.fvFindBar{
+  position:absolute;
+  top:8px;
+  right:10px;
+  z-index:2;
+  display:flex;
+  align-items:center;
+  gap:6px;
+  padding:6px;
+  border:1px solid rgba(240,246,252,.12);
+  border-radius:8px;
+  background:rgba(13,17,23,.94);
+  box-shadow:0 8px 20px rgba(0,0,0,.35);
+}
+
+.fvFindInput{
+  width:170px;
+  height:26px;
+  border:1px solid var(--border);
+  border-radius:6px;
+  background:rgba(0,0,0,.20);
+  color:var(--text);
+  font-size:12px;
+  font-family:var(--font);
+  padding:0 8px;
+  outline:none;
+}
+
+.fvFindInput:focus{
+  border-color:rgba(56,139,253,.65);
+  box-shadow:0 0 0 1px rgba(56,139,253,.32);
+}
+
+.fvFindBtn{
+  height:26px;
+  min-width:30px;
+  border:1px solid rgba(240,246,252,.12);
+  border-radius:6px;
+  background:rgba(255,255,255,.03);
+  color:var(--text);
+  font-size:12px;
+  padding:0 8px;
+  cursor:pointer;
+}
+
+.fvFindBtn:hover{
+  background:rgba(255,255,255,.08);
+}
+
+.fvFindStatus{
+  min-width:56px;
+  color:var(--muted);
+  font-size:11px;
+  text-align:right;
+}
+
+/* keep text visible while find bar overlays top-right */
+.fvEditWrap.find-open .fvEditor,
+.fvEditWrap.find-open .fvGutter pre{
+  padding-top:40px;
+}

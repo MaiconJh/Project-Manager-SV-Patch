@@ -432,8 +432,93 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   let original = current;
   let editing = false;
   let mdRaw = false;
+  let _lineNumberTimer = null;
 
   const isMd = isMarkdownExt(ext);
+
+  function updateLineNumbers(textarea, gutterPre) {
+    if (!textarea || !gutterPre) return;
+    const text = String(textarea.value ?? "");
+    const lines = text.split("\n").length || 1;
+    let out = "";
+    for (let i = 1; i <= lines; i++) {
+      out += i;
+      if (i < lines) out += "\n";
+    }
+    gutterPre.textContent = out;
+  }
+
+  function scheduleLineNumbersRefresh(textarea, gutterPre) {
+    if (_lineNumberTimer) clearTimeout(_lineNumberTimer);
+    _lineNumberTimer = setTimeout(() => updateLineNumbers(textarea, gutterPre), 50);
+  }
+
+  function syncEditorGutterScroll(textarea, gutter) {
+    if (!textarea || !gutter) return;
+    gutter.scrollTop = textarea.scrollTop;
+  }
+
+  function openFindBar(cardEl) {
+    const findBar = cardEl?.querySelector("[data-findbar]");
+    const findInput = cardEl?.querySelector("[data-find-input]");
+    const editWrap = cardEl?.querySelector("[data-edit-wrap]");
+    if (!findBar || !findInput || !editWrap) return;
+    findBar.hidden = false;
+    editWrap.classList.add("find-open");
+    findInput.focus();
+    findInput.select();
+  }
+
+  function closeFindBar(cardEl, focusEditor = false) {
+    const findBar = cardEl?.querySelector("[data-findbar]");
+    const editWrap = cardEl?.querySelector("[data-edit-wrap]");
+    const editor = cardEl?.querySelector("[data-editor]");
+    const findStatus = cardEl?.querySelector("[data-find-status]");
+    if (findBar) findBar.hidden = true;
+    if (editWrap) editWrap.classList.remove("find-open");
+    if (findStatus) findStatus.textContent = "";
+    if (focusEditor && editor) editor.focus();
+  }
+
+  function _findInEditor(cardEl, direction) {
+    const editor = cardEl?.querySelector("[data-editor]");
+    const findInput = cardEl?.querySelector("[data-find-input]");
+    const findStatus = cardEl?.querySelector("[data-find-status]");
+    if (!editor || !findInput) return false;
+
+    const needleRaw = String(findInput.value || "");
+    const needle = needleRaw.toLowerCase();
+    const haystackRaw = String(editor.value || "");
+    const haystack = haystackRaw.toLowerCase();
+
+    if (!needle) {
+      if (findStatus) findStatus.textContent = "Type to search";
+      return false;
+    }
+
+    let idx = -1;
+    if (direction === "prev") {
+      const startPrev = Math.max(0, Number(editor.selectionStart || 0) - 1);
+      idx = haystack.lastIndexOf(needle, startPrev);
+      if (idx < 0) idx = haystack.lastIndexOf(needle);
+    } else {
+      const startNext = Math.max(0, Number(editor.selectionEnd || 0));
+      idx = haystack.indexOf(needle, startNext);
+      if (idx < 0) idx = haystack.indexOf(needle);
+    }
+
+    if (idx < 0) {
+      if (findStatus) findStatus.textContent = "No match";
+      return false;
+    }
+
+    const end = idx + needleRaw.length;
+    editor.focus();
+    editor.setSelectionRange(idx, end);
+    editor.scrollTop = editor.scrollTop;
+    if (findStatus) findStatus.textContent = "";
+    return true;
+  }
 
   function renderViewer() {
     const body = card.querySelector("[data-body]");
@@ -458,6 +543,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   function setEditing(on) {
     editing = Boolean(on);
     const editor = card.querySelector("[data-editor]");
+    const editWrap = card.querySelector("[data-edit-wrap]");
     const viewer = card.querySelector("[data-viewer]");
     const btnEdit = card.querySelector("[data-edit]");
     const btnSave = card.querySelector("[data-save]");
@@ -471,9 +557,17 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
 
     if (btnClose) btnClose.style.display = editing ? "none" : "";
 
+    if (editWrap) editWrap.style.display = editing ? "" : "none";
     if (editor) {
       editor.style.display = editing ? "" : "none";
       if (editing) editor.value = current;
+    }
+    if (!editing) closeFindBar(card, false);
+    if (editing) {
+      const gutterPre = card.querySelector("[data-lines]");
+      const gutter = card.querySelector("[data-gutter]");
+      updateLineNumbers(editor, gutterPre);
+      syncEditorGutterScroll(editor, gutter);
     }
     if (viewer) viewer.style.display = editing ? "none" : "";
     if (btnEdit) btnEdit.classList.toggle("active", editing);
@@ -536,7 +630,19 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
         }
       </div>
 
-      <textarea class="fvEditor" data-editor="1" spellcheck="false" style="display:none"></textarea>
+      <div class="fvEditWrap" data-edit-wrap="1" style="display:none">
+        <div class="fvFindBar" data-findbar="1" hidden>
+          <input type="text" class="fvFindInput" data-find-input="1" placeholder="Find" aria-label="Find in editor" />
+          <button class="fvFindBtn" type="button" data-find-prev="1">Prev</button>
+          <button class="fvFindBtn" type="button" data-find-next="1">Next</button>
+          <button class="fvFindBtn" type="button" data-find-close="1" aria-label="Close find">×</button>
+          <span class="fvFindStatus" data-find-status="1"></span>
+        </div>
+        <div class="fvEditMain">
+          <div class="fvGutter" data-gutter="1" aria-hidden="true"><pre data-lines="1">1</pre></div>
+          <textarea class="fvEditor" data-editor="1" spellcheck="false" style="display:none"></textarea>
+        </div>
+      </div>
     </div>
   `;
 
@@ -691,6 +797,58 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       const baseName = (relPath || absPath).split("/").pop() || (relPath || absPath);
       const dirty = isDirty();
       titleEl.textContent = dirty ? baseName + " *" : baseName;
+    }
+
+    const editorEl = card.querySelector("[data-editor]");
+    const gutterPre = card.querySelector("[data-lines]");
+    scheduleLineNumbersRefresh(editorEl, gutterPre);
+  });
+
+  card.querySelector("[data-editor]")?.addEventListener("scroll", (e) => {
+    const gutter = card.querySelector("[data-gutter]");
+    syncEditorGutterScroll(e.target, gutter);
+  });
+
+  card.querySelector("[data-editor]")?.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && String(e.key || "").toLowerCase() === "f") {
+      e.preventDefault();
+      if (!editing) return;
+      openFindBar(card);
+      return;
+    }
+    if (String(e.key || "") === "Escape") {
+      const findBar = card.querySelector("[data-findbar]");
+      if (findBar && !findBar.hidden) {
+        e.preventDefault();
+        closeFindBar(card, true);
+      }
+    }
+  });
+
+  card.querySelector("[data-find-close]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeFindBar(card, true);
+  });
+
+  card.querySelector("[data-find-next]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    _findInEditor(card, "next");
+  });
+
+  card.querySelector("[data-find-prev]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    _findInEditor(card, "prev");
+  });
+
+  card.querySelector("[data-find-input]")?.addEventListener("keydown", (e) => {
+    if (String(e.key || "") === "Escape") {
+      e.preventDefault();
+      closeFindBar(card, true);
+      return;
+    }
+    if (String(e.key || "") === "Enter") {
+      e.preventDefault();
+      _findInEditor(card, e.shiftKey ? "prev" : "next");
     }
   });
 

@@ -1,0 +1,6 @@
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/keep.txt | keep-v1
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/delete.txt | delete-me
+WRITE_FILE | tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/keep.txt | keep-v2
+DELETE_FILE | tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/delete.txt
+ASSERT_REGEX | tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/keep.txt | keep-v2
+ASSERT_FILE_NOT_EXISTS | tools/sv_patch/validation/artifacts/workspaces/history_backup/tmp/delete.txt

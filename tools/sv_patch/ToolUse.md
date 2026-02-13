@@ -444,6 +444,40 @@ Each pipeline step is an object with:
 
 ---
 
+
+## Contract Validation Framework
+
+A permanent contract suite is available under `tools/sv_patch/validation/`.
+
+### Validation philosophy
+- Behavioral contracts are defined in `.rw` scripts and orchestrated by `.pipeline.json` files.
+- Validation executes both `--plan` and `--apply` for each pipeline.
+- Baseline reports are compared to fresh reports to detect runtime drift.
+
+### Single runtime source of truth
+All contract runs invoke exactly:
+
+`tools/sv_patch/sv_patch-(DeepSeekV1)_multiline_atomic_v3.py`
+
+No alternate runner implementation is used for behavior validation.
+
+### Run commands
+
+```bash
+python tools/sv_patch/validation/runner/run_validation.py
+```
+
+To refresh baselines:
+
+```bash
+python tools/sv_patch/validation/runner/run_validation.py --write-baseline
+```
+
+### Baseline enforcement
+- Baselines live in `tools/sv_patch/validation/baselines/reports/`.
+- Report comparison ignores dynamic metadata (`run_id`, timestamps, durations, artifact paths).
+- Contract comparison validates behavioral outputs: errors, changed flags, operation records, and diffs.
+
 ## CLI QUICK REFERENCE
 
 ```bash

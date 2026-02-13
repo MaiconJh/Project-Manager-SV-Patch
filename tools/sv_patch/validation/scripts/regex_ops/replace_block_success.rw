@@ -1,0 +1,10 @@
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/block.txt | <<EOF
+begin
+START
+old-line
+END
+finish
+EOF
+REPLACE_BLOCK | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/block.txt | ^START$ | ^END$ | replacement-line
+ASSERT_REGEX | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/block.txt | replacement-line
+ASSERT_NOT_REGEX | tools/sv_patch/validation/artifacts/workspaces/regex_ops/tmp/block.txt | old-line

@@ -1,0 +1,13 @@
+{
+  "steps": [
+    {
+      "name": "safety-and-limit-contract",
+      "scripts": [
+        "tools/sv_patch/validation/scripts/safety_limits/path_traversal_rejected_expected_fail.rw",
+        "tools/sv_patch/validation/scripts/safety_limits/allowlist_violation_expected_fail.rw",
+        "tools/sv_patch/validation/scripts/safety_limits/max_files_limit_expected_fail.rw",
+        "tools/sv_patch/validation/scripts/safety_limits/max_bytes_limit_expected_fail.rw"
+      ]
+    }
+  ]
+}

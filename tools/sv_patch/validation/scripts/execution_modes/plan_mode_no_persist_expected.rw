@@ -1,0 +1,2 @@
+UPSERT_FILE | tools/sv_patch/validation/artifacts/workspaces/execution_modes/tmp/plan_apply.txt | from-pipeline
+ASSERT_FILE_EXISTS | tools/sv_patch/validation/artifacts/workspaces/execution_modes/tmp/plan_apply.txt

@@ -448,6 +448,18 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     gutterPre.textContent = out;
   }
 
+  function updateViewerLineNumbers(text, gutterPre) {
+    if (!gutterPre) return;
+    const src = String(text ?? "");
+    const lines = src.split(/\r?\n/).length || 1;
+    let out = "";
+    for (let i = 1; i <= lines; i++) {
+      out += i;
+      if (i < lines) out += "\n";
+    }
+    gutterPre.textContent = out;
+  }
+
   function scheduleLineNumbersRefresh(textarea, gutterPre) {
     if (_lineNumberTimer) clearTimeout(_lineNumberTimer);
     _lineNumberTimer = setTimeout(() => updateLineNumbers(textarea, gutterPre), 50);
@@ -533,7 +545,9 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       if (rawEl) rawEl.style.display = mdRaw ? "" : "none";
     } else {
       const codeEl = body.querySelector("[data-code]");
+      const viewLinesEl = body.querySelector("[data-view-lines]");
       if (codeEl) codeEl.innerHTML = highlight(current, lang);
+      updateViewerLineNumbers(current, viewLinesEl);
     }
 
     const metaEl = card.querySelector("[data-meta]");
@@ -557,7 +571,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
 
     if (btnClose) btnClose.style.display = editing ? "none" : "";
 
-    if (editWrap) editWrap.style.display = editing ? "" : "none";
+    if (editWrap) editWrap.style.display = editing ? "block" : "none";
     if (editor) {
       editor.style.display = editing ? "" : "none";
       if (editing) editor.value = current;
@@ -626,7 +640,10 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
           isMd
             ? `<div class="fvMd" data-md="1">${renderMarkdown(current)}</div>
                <pre class="fvCode fvCodeRaw" data-rawbody="1" style="display:none"><code>${escapeHtml(current)}</code></pre>`
-            : `<pre class="fvCode"><code data-code="1">${highlight(current, lang)}</code></pre>`
+            : `<div class="fvCodeWithLines" data-code-wrap="1">
+                 <pre class="fvLineNums" data-view-lines="1"></pre>
+                 <pre class="fvCode"><code data-code="1">${highlight(current, lang)}</code></pre>
+               </div>`
         }
       </div>
 

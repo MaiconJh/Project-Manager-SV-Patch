@@ -1785,3 +1785,33 @@ body.has-apply-diff .applyDiffModal{
 .fvEditWrap.find-open .fvGutter pre{
   padding-top:40px;
 }
+
+
+/* =========================================================
+   File Viewer view-mode line numbers (plain/raw code view)
+   ========================================================= */
+.fvCodeWithLines{
+  display:grid;
+  grid-template-columns:52px minmax(0,1fr);
+  align-items:start;
+  min-width:100%;
+}
+
+.fvLineNums{
+  margin:0;
+  padding:12px 8px 12px 0;
+  text-align:right;
+  border-right:1px solid rgba(240,246,252,.10);
+  background:rgba(0,0,0,.16);
+  color:var(--muted);
+  user-select:none;
+  font-family:var(--mono);
+  font-size:12.5px;
+  line-height:1.45;
+  white-space:pre;
+}
+
+.fvCodeWithLines .fvCode{
+  min-width:0;
+  margin:0;
+}

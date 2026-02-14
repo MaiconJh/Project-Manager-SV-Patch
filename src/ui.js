@@ -59,6 +59,7 @@ const _exportPresetState = {
   pendingAutoApply: false,
   lastAppliedCycleToken: 0,
   lastHealth: "none", // none | ok | partial | broken
+  feedbackTimer: null,
 };
 
 const _applyDiffState = {
@@ -1344,9 +1345,6 @@ function syncExpandedIdsFromPaths(tree){
       if(n.children && n.children.length) n.children.forEach(walk);
     };
     walk(tree);
-    for(const p of Array.from(expandedPaths)){
-      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
-    }
   }catch{}
 }
 
@@ -2033,21 +2031,53 @@ function _setPresetFeedback(message, mode = "none") {
   fb.classList.remove("ok", "partial", "broken", "loading");
   if (mode && mode !== "none") fb.classList.add(mode);
 }
+function _defaultPresetName() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `Preset ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function _setPresetFeedbackTimed(message, mode = "none", ttl = 2600) {
+  _setPresetFeedback(message, mode);
+  try { if (_exportPresetState.feedbackTimer) clearTimeout(_exportPresetState.feedbackTimer); } catch {}
+  if (mode === "loading") return;
+  _exportPresetState.feedbackTimer = setTimeout(() => {
+    const fb = el("presetFeedback");
+    if (!fb) return;
+    if (_exportPresetState.selectedId) {
+      const p = (_exportPresetState.presets || []).find((x) => String(x?.id || "") === String(_exportPresetState.selectedId));
+      if (p) {
+        _setPresetFeedback(`Preset ${p.name}: ready`, "none");
+        return;
+      }
+    }
+    _setPresetFeedback("Preset: None", "none");
+  }, Math.max(800, Number(ttl || 0)));
+}
 
 function _refreshPresetControlsUi() {
   const sel = el("exportPresetSelect");
   if (sel) {
     const current = _exportPresetState.selectedId || "";
-    const options = ['<option value="">None</option>'];
+    while (sel.firstChild) sel.removeChild(sel.firstChild);
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "None";
+    sel.appendChild(none);
     for (const p of _exportPresetState.presets) {
       const id = String(p?.id || "");
       const name = String(p?.name || "Preset");
       if (!id) continue;
-      const selected = id === current ? ' selected' : '';
-      options.push(`<option value="${id}"${selected}>${name}</option>`);
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = name;
+      sel.appendChild(opt);
     }
-    sel.innerHTML = options.join("");
     sel.value = current;
+    if (sel.value !== current) {
+      _exportPresetState.selectedId = "";
+      sel.value = "";
+    }
   }
   const auto = el("chkPresetAutoApply");
   if (auto) auto.checked = Boolean(_exportPresetState.autoApply);
@@ -2117,7 +2147,7 @@ async function _applyPreset(preset, snapshot, reason = "manual") {
   const token = ++_exportPresetState.applyToken;
   _exportPresetState.applying = true;
   _refreshPresetControlsUi();
-  _setPresetFeedback(`Applying preset: ${preset.name || "Preset"}… Loading…`, "loading");
+  _setPresetFeedbackTimed(`Applying preset: ${preset.name || "Preset"}… Loading…`, "loading");
 
   try {
     const health = _evaluatePresetHealth(preset, snapshot);
@@ -2125,7 +2155,8 @@ async function _applyPreset(preset, snapshot, reason = "manual") {
 
     if (health.status === "broken" && reason === "auto-refresh") {
       _exportPresetState.lastHealth = "broken";
-      _setPresetFeedback(`Broken: project mismatch for preset ${preset.name || "Preset"}`, "broken");
+      _setPresetFeedbackTimed(`Broken: project mismatch for preset ${preset.name || "Preset"}`, "broken", 4200);
+      try { addLog(`[PRESET] broken(project-mismatch): ${preset.name || "Preset"}`); } catch {}
       return;
     }
 
@@ -2183,9 +2214,11 @@ async function _applyPreset(preset, snapshot, reason = "manual") {
     const msg = health.status === "partial"
       ? `Applied: ${preset.name || "Preset"} · Partial (${health.missingSelection.length + health.missingExpanded.length} missing) · expanded ${expandedPaths.size} · selected ${health.selectedCount} → ${resolved}`
       : `Applied: ${preset.name || "Preset"} · expanded ${expandedPaths.size} · selected ${health.selectedCount} → ${resolved}`;
-    _setPresetFeedback(msg, mode);
+    _setPresetFeedbackTimed(msg, mode, 3200);
+    try { addLog(`[PRESET] applied: ${preset.name || "Preset"} (${mode})`); } catch {}
   } catch (e) {
-    _setPresetFeedback(`Apply failed: ${e?.message || e}`, "broken");
+    _setPresetFeedbackTimed(`Apply failed: ${e?.message || e}`, "broken", 4200);
+    try { addLog(`[PRESET] apply failed: ${e?.message || e}`); } catch {}
   } finally {
     if (token === _exportPresetState.applyToken) {
       _exportPresetState.applying = false;
@@ -2195,28 +2228,46 @@ async function _applyPreset(preset, snapshot, reason = "manual") {
 }
 
 function _savePresetByName(name, snapshot) {
-  const n = String(name || "").trim();
-  if (!n || !snapshot?.projectPath) return;
+  if (!snapshot?.projectPath) {
+    _setPresetFeedbackTimed("Save failed: open a project first", "broken", 3600);
+    try { addLog("[PRESET] save failed: no project loaded"); } catch {}
+    return;
+  }
+
+  const n = String(name || "").trim() || _defaultPresetName();
   const draft = _buildCurrentPresetDraft(snapshot);
-  const id = `${n.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${Date.now()}`;
+  const existing = (_exportPresetState.presets || []).find((p) => String(p?.name || "") === n);
+  const id = String(existing?.id || `${n.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${Date.now()}`);
   const preset = {
     id,
     name: n,
     updated_at: new Date().toISOString(),
     ...draft,
   };
-  _exportPresetState.presets = (_exportPresetState.presets || []).filter((p) => p && p.name !== n);
+  _exportPresetState.presets = (_exportPresetState.presets || []).filter((p) => p && String(p.id || "") !== id && String(p.name || "") !== n);
   _exportPresetState.presets.unshift(preset);
   _exportPresetState.selectedId = id;
   _saveExportPresetsConfig();
   _refreshPresetControlsUi();
-  _setPresetFeedback(`Saved preset: ${n}`, "ok");
+  _setPresetFeedbackTimed(`Saved preset: ${n}`, "ok", 2600);
+  try { addLog(`[PRESET] saved: ${n}`); } catch {}
 }
 
 async function _applySelectedPresetNow(snapshot, reason = "manual") {
   const id = _exportPresetState.selectedId;
+  if (!id) {
+    _setPresetFeedbackTimed("Apply failed: choose a preset", "broken", 2800);
+    return;
+  }
+  if (!snapshot?.projectPath) {
+    _setPresetFeedbackTimed("Apply failed: no active snapshot", "broken", 3200);
+    return;
+  }
   const preset = (_exportPresetState.presets || []).find((p) => String(p?.id || "") === String(id || ""));
-  if (!preset || !snapshot) return;
+  if (!preset) {
+    _setPresetFeedbackTimed("Apply failed: selected preset not found", "broken", 3200);
+    return;
+  }
   await _applyPreset(preset, snapshot, reason);
 }
 
@@ -3499,7 +3550,7 @@ function bind() {
     _refreshPresetControlsUi();
     if (_exportPresetState.selectedId) {
       const p = (_exportPresetState.presets || []).find((x) => String(x?.id || "") === _exportPresetState.selectedId);
-      if (p) _setPresetFeedback(`Selected preset: ${p.name}`, "none");
+      if (p) _setPresetFeedbackTimed(`Selected preset: ${p.name}`, "none", 1600);
     }
   });
 
@@ -3511,8 +3562,8 @@ function bind() {
 
   el("btnPresetSave")?.addEventListener("click", () => {
     const fallback = ((_exportPresetState.presets || [])[0]?.name || "").trim();
-    const name = window.prompt("Preset name", fallback || "My preset");
-    if (!name) return;
+    const typed = window.prompt("Preset name", fallback || _defaultPresetName());
+    const name = String(typed == null ? "" : typed).trim() || _defaultPresetName();
     _savePresetByName(name, lastSnapshot);
   });
 

@@ -5,7 +5,6 @@ const uiJs = fs.readFileSync('src/ui.js', 'utf8');
 const appJs = fs.readFileSync('src/app.js', 'utf8');
 
 const htmlIds = new Set([...html.matchAll(/id="([^"]+)"/g)].map((m) => m[1]));
-
 const elIdMatches = [...uiJs.matchAll(/el\("([^"]+)"\)/g)].map((m) => m[1]);
 const buttonIds = new Set(elIdMatches.filter((id) => /^btn[A-Z]/.test(id)));
 
@@ -35,10 +34,25 @@ for (const id of buttonIds) {
 const uiChannels = [...uiJs.matchAll(/ipcRenderer\.(?:invoke|send)\("([^"]+)"/g)].map((m) => m[1]);
 const uniqueChannels = [...new Set(uiChannels)];
 const appHandles = new Set([...appJs.matchAll(/ipcMain\.(?:handle|on)\("([^"]+)"/g)].map((m) => m[1]));
-
 const missingIpc = uniqueChannels.filter((ch) => !appHandles.has(ch));
 
 const silentGuards = [...uiJs.matchAll(/if\s*\(![^\)]*\)\s*return\s*;?/g)].map((m) => m[0]);
+
+const referencedPrivate = new Set();
+for (const m of uiJs.matchAll(/\b(_[A-Za-z0-9_]+)\s*\(/g)) {
+  const name = m[1];
+  const prev = uiJs[m.index - 1] || '';
+  if (prev === '.') continue;
+  if (['if', 'for', 'while', 'switch', 'catch', 'function'].includes(name)) continue;
+  referencedPrivate.add(name);
+}
+const definedPrivate = new Set();
+for (const m of uiJs.matchAll(/function\s+(_[A-Za-z0-9_]+)\s*\(/g)) definedPrivate.add(m[1]);
+for (const m of uiJs.matchAll(/const\s+(_[A-Za-z0-9_]+)\s*=\s*\(/g)) definedPrivate.add(m[1]);
+for (const m of uiJs.matchAll(/const\s+(_[A-Za-z0-9_]+)\s*=\s*async\s*\(/g)) definedPrivate.add(m[1]);
+
+const knownGlobalAllowed = new Set(['_']);
+const missingPrivateRefs = [...referencedPrivate].filter((name) => !definedPrivate.has(name) && !knownGlobalAllowed.has(name));
 
 console.log('== UI Global Buttons Integrity ==');
 console.log(`Buttons discovered in ui.js: ${buttonIds.size}`);
@@ -58,7 +72,17 @@ if (guardSample.length) {
   for (const g of guardSample) console.log('   * ' + g);
 }
 
-if (missingIds.length || missingBindings.length || missingIpc.length) {
+console.log(`Missing private function references in ui.js: ${missingPrivateRefs.length}`);
+if (missingPrivateRefs.length) {
+  console.log('  - ' + missingPrivateRefs.join(', '));
+}
+
+if (!definedPrivate.has('_refreshPresetControlsUi')) {
+  console.log('  - required private function missing: _refreshPresetControlsUi');
+  process.exit(1);
+}
+
+if (missingIds.length || missingBindings.length || missingIpc.length || missingPrivateRefs.length) {
   process.exit(1);
 }
 console.log('PASS UI wiring integrity');

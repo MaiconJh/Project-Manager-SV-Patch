@@ -1,4 +1,4 @@
-// @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback.
+// @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback ui-diagnostics preset-ui-fix safe-bind.
 /*
 PM-SV-PATCH META
 Version: pm-svpatch-ui@2026.02.11-r1
@@ -16,24 +16,84 @@ const el = (id) => document.getElementById(id);
 
 const __PM_UI_DEV__ = !process?.env || process.env.NODE_ENV !== "production";
 const __PM_UI_TRACE_CLICKS__ = __PM_UI_DEV__ && process?.env?.PM_UI_TRACE_CLICKS === "1";
+const __UI_BIND_EXPECTED_BUTTON_IDS__ = [
+  "btnOpen",
+  "btnRefreshFiles",
+  "btnHelp",
+  "btnClearIgnored",
+  "btnExportPrimary",
+  "btnCopyLogs",
+  "btnClearLogs",
+  "btnPickRunner",
+  "btnBuildManifest",
+  "btnSavePipeline",
+  "btnRunPlan",
+  "btnRunApply",
+  "btnStopPatch",
+  "btnPresetSaveFile",
+  "btnPresetImportFile",
+];
+const __UI_BIND_METRICS__ = {
+  expected: new Set(__UI_BIND_EXPECTED_BUTTON_IDS__),
+  wired: new Set(),
+  missingDom: new Set(),
+  missingHandler: new Set(),
+};
 function _uiDevLog(msg, err) {
   try { if (typeof addLog === "function") addLog(`[UI] ${msg}${err ? ` :: ${err?.message || err}` : ""}`); } catch {}
   try { if (err) console.error(`[UI] ${msg}`, err); else console.warn(`[UI] ${msg}`); } catch {}
 }
+function _reportUiBindingIssue(message) {
+  try { console.error(`[UI] ${message}`); } catch {}
+  try { showToast(message, { type: "error", ttl: 2400 }); } catch {}
+}
 function _bindClickSafe(id, handler, opts = {}) {
   const node = el(id);
   if (!node) {
-    if (__PM_UI_DEV__ && opts.required !== false) _uiDevLog(`missing element for click binding: #${id}`);
+    if (opts.required !== false) {
+      __UI_BIND_METRICS__.missingDom.add(id);
+      _reportUiBindingIssue(`Missing UI element: #${id}`);
+    }
     return;
   }
+  if (typeof handler !== "function") {
+    __UI_BIND_METRICS__.missingHandler.add(id);
+    _reportUiBindingIssue(`Missing click handler: #${id}`);
+    return;
+  }
+  __UI_BIND_METRICS__.wired.add(id);
   node.addEventListener("click", async (ev) => {
     try {
       await handler(ev);
     } catch (e) {
+      _reportUiBindingIssue(`Action failed (${id})`);
       _uiDevLog(`click handler failed: #${id}`, e);
       showToast(`Action failed (${id})`, { type: "error", ttl: 2600 });
     }
   });
+}
+
+function _reportUiBindHealth() {
+  if (!__PM_UI_DEV__) return;
+  try {
+    const expected = __UI_BIND_METRICS__.expected;
+    for (const id of expected) {
+      if (!__UI_BIND_METRICS__.wired.has(id) && !__UI_BIND_METRICS__.missingDom.has(id)) {
+        __UI_BIND_METRICS__.missingHandler.add(id);
+      }
+    }
+    const wiredCount = __UI_BIND_METRICS__.wired.size;
+    const missingCount = __UI_BIND_METRICS__.missingDom.size + __UI_BIND_METRICS__.missingHandler.size;
+    console.log(`[UI] bind complete: ${wiredCount} buttons wired, ${missingCount} missing`);
+    if (__UI_BIND_METRICS__.missingDom.size) {
+      console.error(`[UI] bind missing DOM IDs: ${Array.from(__UI_BIND_METRICS__.missingDom).join(", ")}`);
+    }
+    if (__UI_BIND_METRICS__.missingHandler.size) {
+      console.error(`[UI] bind missing handlers: ${Array.from(__UI_BIND_METRICS__.missingHandler).join(", ")}`);
+    }
+  } catch (e) {
+    _uiDevLog("bind health report failed", e);
+  }
 }
 
 const expanded = new Set();
@@ -1382,6 +1442,21 @@ function _cleanupExpandedPathsFromTree(tree){
   }catch{}
 }
 
+function _cleanupExpandedPathsFromTree(tree){
+  try{
+    const dirSet = new Set();
+    const walk = (n)=>{
+      if(!n) return;
+      if(n.isDir) dirSet.add(_normalizeAbsPath(n.absPath));
+      if(n.children && n.children.length) n.children.forEach(walk);
+    };
+    walk(tree);
+    for(const p of Array.from(expandedPaths)){
+      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
+    }
+  }catch{}
+}
+
 function flattenTree(node, depth, out, ignoredSet) {
   const hasChildren = node.isDir && node.children && node.children.length > 0;
   out.push({
@@ -1524,6 +1599,17 @@ function _collectDescendantsFromSnapshot(snapshot, folderPathNormalized) {
   };
   walkDesc(target);
   return out;
+}
+
+function _collectSnapshotPathIndex(snapshot) {
+  const all = new Set();
+  const walk = (node) => {
+    if (!node) return;
+    all.add(_normalizeAbsPath(node.absPath));
+    for (const ch of node.children || []) walk(ch);
+  };
+  walk(snapshot?.tree || null);
+  return { all };
 }
 
 function _applyFolderSelection(selectedSet, folderPathNormalized, isSelecting, descendantsList) {
@@ -2027,6 +2113,16 @@ function _setPresetActionButtonsBusy(busy) {
   const bImport = el("btnPresetImportFile");
   if (bSave) bSave.disabled = !!busy;
   if (bImport) bImport.disabled = !!busy;
+}
+
+// Backward compatibility shim for legacy preset UI calls.
+function _refreshPresetControlsUi() {
+  _setPresetActionButtonsBusy(Boolean(_exportPresetState.applying));
+  if (_exportPresetState.lastPresetPath) {
+    _setPresetFeedback(`Preset file: ${path.basename(_exportPresetState.lastPresetPath)}`, "none");
+  } else {
+    _setPresetFeedback("Preset: idle", "none");
+  }
 }
 
 function _buildPresetV1(snapshot) {
@@ -3509,7 +3605,7 @@ function bind() {
     await _runExportByType("json");
   });
 
-  el("btnExportPrimary")?.addEventListener("click", async () => {
+  _bindClickSafe("btnExportPrimary", async () => {
     const tabChk = el("chkExportSelectedOnlyTab");
     const mainChk = el("chkExportSelectedOnly");
     if (mainChk && tabChk) mainChk.checked = Boolean(tabChk.checked);
@@ -3663,6 +3759,10 @@ function bind() {
     top.remove();
     _syncFvFullscreenState();
   });
+
+  _refreshPresetControlsUi();
+  _reportUiBindHealth();
+
 }
 
 // ─────────────────────────────────────────────
@@ -3690,9 +3790,20 @@ ipcRenderer.on("watcher:changed", (_ev, payload) => {
 
 if (__PM_UI_DEV__) {
   window.addEventListener("error", (ev) => {
+    const msg = String(ev?.message || "unknown");
+    if (msg.includes("is not defined")) {
+      console.error("[UI FATAL] Undefined reference:", msg);
+      try { _setPresetFeedbackTimed(`Error: ${msg}`, "error", 4200); } catch {}
+    }
     _uiDevLog(`window error: ${ev?.message || "unknown"}`, ev?.error || null);
   });
   window.addEventListener("unhandledrejection", (ev) => {
+    const reason = ev?.reason;
+    const msg = String(reason?.message || reason || "");
+    if (msg.includes("is not defined")) {
+      console.error("[UI FATAL] Undefined reference:", msg);
+      try { _setPresetFeedbackTimed(`Error: ${msg}`, "error", 4200); } catch {}
+    }
     _uiDevLog("unhandled rejection", ev?.reason || null);
   });
 }
@@ -3706,6 +3817,51 @@ if (__PM_UI_TRACE_CLICKS__) {
       _uiDevLog(`pointerdown target=${id}`);
     } catch {}
   }, true);
+}
+
+
+if (__PM_UI_DEV__) {
+  let __uiDiagEnabled = false;
+  let __uiDiagBox = null;
+  let __uiDiagOutline = null;
+  const _diagEnsure = () => {
+    if (__uiDiagBox && __uiDiagOutline) return;
+    __uiDiagBox = document.createElement("div");
+    __uiDiagBox.style.cssText = "position:fixed;right:10px;bottom:10px;z-index:2147483647;padding:6px 8px;border-radius:8px;background:rgba(0,0,0,.82);color:#d1d5db;font:11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;pointer-events:none;white-space:pre;display:none;";
+    __uiDiagOutline = document.createElement("div");
+    __uiDiagOutline.style.cssText = "position:fixed;z-index:2147483646;border:1px dashed #67e8f9;pointer-events:none;display:none;";
+    document.body.appendChild(__uiDiagBox);
+    document.body.appendChild(__uiDiagOutline);
+  };
+  const _diagUpdate = (target) => {
+    if (!__uiDiagEnabled || !target || !(target instanceof Element)) return;
+    _diagEnsure();
+    const r = target.getBoundingClientRect();
+    const cs = getComputedStyle(target);
+    __uiDiagOutline.style.display = "block";
+    __uiDiagOutline.style.left = `${r.left}px`;
+    __uiDiagOutline.style.top = `${r.top}px`;
+    __uiDiagOutline.style.width = `${Math.max(0, r.width)}px`;
+    __uiDiagOutline.style.height = `${Math.max(0, r.height)}px`;
+    __uiDiagBox.style.display = "block";
+    __uiDiagBox.textContent = [
+      `id: ${target.id || "(none)"}`,
+      `class: ${(target.className || "").toString().trim() || "(none)"}`,
+      `z-index: ${cs.zIndex || "auto"}`,
+      `pointer-events: ${cs.pointerEvents || "auto"}`,
+    ].join("\n");
+  };
+  window.addEventListener("keydown", (ev) => {
+    if (!(ev.ctrlKey && ev.altKey && (ev.key === "d" || ev.key === "D"))) return;
+    __uiDiagEnabled = !__uiDiagEnabled;
+    _diagEnsure();
+    if (!__uiDiagEnabled) {
+      __uiDiagBox.style.display = "none";
+      __uiDiagOutline.style.display = "none";
+    }
+    _uiDevLog(`diag-overlay ${__uiDiagEnabled ? "enabled" : "disabled"}`);
+  }, true);
+  window.addEventListener("mousemove", (ev) => _diagUpdate(ev.target), true);
 }
 
 // bootstrap

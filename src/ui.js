@@ -238,6 +238,7 @@ function _scheduleAutoRefresh(reason) {
 
     try {
       b?.classList?.add("busy");
+      _markPresetRefreshCycle();
       showToast("Auto-refresh: changes detected…", { type: "info", ttl: 1400 });
       await ipcRenderer.invoke("project:refresh");
       showToast("Auto-refresh: files updated.", { type: "success", ttl: 1600 });
@@ -3776,6 +3777,7 @@ function bind() {
     _exportSelectionState.selectedMode = prof.scope === "selected" ? "selected" : "all";
   }catch{}
   setTabs();
+  _refreshPresetControlsUi();
   _bindFileListVirtualEvents();
   _setupKeyboardFocusModality();
 
@@ -3816,6 +3818,7 @@ function bind() {
 
     try {
       b?.classList?.add("busy");
+      _markPresetRefreshCycle();
       showToast("Refreshing files…", { type: "info", ttl: 1600 });
 
       const res = await ipcRenderer.invoke("project:refresh");
@@ -4120,6 +4123,7 @@ ipcRenderer.on("state:update", (_, snapshot) => {
     try { done(snapshot); } catch {}
   }
   render(snapshot);
+  _maybeAutoApplyPreset(snapshot);
 });
 
 ipcRenderer.on("log:append", (_, line) => {

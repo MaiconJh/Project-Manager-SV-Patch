@@ -1,4 +1,4 @@
-// @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback ui-diagnostics preset-ui-fix safe-bind tree-scroll-preserve files-header-sticky breadcrumb kb-nav.
+// @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback ui-diagnostics preset-ui-fix safe-bind tree-scroll-preserve files-header-sticky breadcrumb kb-nav hit-test bind-guard.
 /*
 PM-SV-PATCH META
 Version: pm-svpatch-ui@2026.02.11-r1
@@ -63,16 +63,57 @@ function _bindClickSafe(id, handler, opts = {}) {
     return;
   }
   __UI_BIND_METRICS__.wired.add(id);
-  node.addEventListener("click", async (ev) => {
-    try {
-      await handler(ev);
-    } catch (e) {
-      console.error("[UI] Handler failed:", id, e);
-      _reportUiBindingIssue(`Action failed (${id})`);
-      _uiDevLog(`click handler failed: #${id}`, e);
-      showToast(`Action failed (${id})`, { type: "error", ttl: 2600 });
-    }
+  node.addEventListener("click", (ev) => {
+    Promise.resolve()
+      .then(() => handler(ev))
+      .catch((e) => {
+        console.error("[UI] Handler failed:", id, e);
+        _reportUiBindingIssue(`Action failed (${id})`);
+        _uiDevLog(`click handler failed: #${id}`, e);
+        showToast(`Action failed (${id})`, { type: "error", ttl: 2600 });
+      });
   });
+}
+
+function _uiHitTestAtCenter(node) {
+  if (!node || typeof node.getBoundingClientRect !== "function") return null;
+  const r = node.getBoundingClientRect();
+  const cx = Math.max(0, Math.min(window.innerWidth - 1, Math.floor(r.left + Math.max(1, r.width) / 2)));
+  const cy = Math.max(0, Math.min(window.innerHeight - 1, Math.floor(r.top + Math.max(1, r.height) / 2)));
+  const top = document.elementFromPoint(cx, cy);
+  return { cx, cy, top };
+}
+
+function _diagWhyNotClickable(node, id) {
+  if (!__PM_UI_DEV__) return;
+  if (!node) {
+    console.error(`[UI][HitTest] ${id}: missing node`);
+    return;
+  }
+  const hit = _uiHitTestAtCenter(node);
+  const top = hit?.top || null;
+  const ncs = getComputedStyle(node);
+  const parent = node.closest(".panelHead, .panelTitleRow, .presetQuick") || node.parentElement;
+  const pcs = parent ? getComputedStyle(parent) : null;
+  const tcs = top ? getComputedStyle(top) : null;
+  const blocked = top && top !== node && !node.contains(top);
+  if (!blocked) {
+    console.info(`[UI][HitTest] ${id}: OK`);
+    return;
+  }
+  console.warn(`[UI][HitTest] ${id}: BLOCKED by ${top?.id ? '#'+top.id : top?.tagName}`, {
+    node: { pointerEvents: ncs.pointerEvents, zIndex: ncs.zIndex, visibility: ncs.visibility, display: ncs.display, opacity: ncs.opacity },
+    parent: parent ? { pointerEvents: pcs.pointerEvents, zIndex: pcs.zIndex, visibility: pcs.visibility, display: pcs.display, opacity: pcs.opacity } : null,
+    top: tcs ? { pointerEvents: tcs.pointerEvents, zIndex: tcs.zIndex, visibility: tcs.visibility, display: tcs.display, opacity: tcs.opacity } : null,
+    point: { x: hit?.cx, y: hit?.cy },
+  });
+}
+
+function _runUiGlobalHitTestReport() {
+  if (!__PM_UI_DEV__) return;
+  if (process?.env?.PM_UI_DIAG_HITTEST !== "1") return;
+  const ids = ["btnOpen", "btnRefreshFiles", "btnExportPrimary", "btnPresetMenu", "presetMenuSave", "presetMenuImport"];
+  for (const id of ids) _diagWhyNotClickable(el(id), id);
 }
 
 function _reportUiBindHealth() {
@@ -142,6 +183,7 @@ const _exportPresetState = {
 };
 
 const _stateUpdateWaiters = [];
+let __uiBindRan = false;
 const _presetMenuState = {
   open: false,
 };
@@ -5100,6 +5142,799 @@ function _sanitizeExportProfileForPreset(profile) {
   }
   return p;
 }
+function syncExpandedIdsFromPaths(tree){
+  try{
+    expanded.clear();
+    const walk = (n)=>{
+      if(!n) return;
+      if(n.isDir && expandedPaths.has(_normalizeAbsPath(n.absPath))) expanded.add(n.id);
+      if(n.children && n.children.length) n.children.forEach(walk);
+    };
+    walk(tree);
+  }catch{}
+}
+
+function _cleanupExpandedPathsFromTree(tree){
+  try{
+    const dirSet = new Set();
+    const walk = (n)=>{
+      if(!n) return;
+      if(n.isDir) dirSet.add(_normalizeAbsPath(n.absPath));
+      if(n.children && n.children.length) n.children.forEach(walk);
+    };
+    walk(tree);
+    for(const p of Array.from(expandedPaths)){
+      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
+    }
+  }catch{}
+}
+
+function flattenTree(node, depth, out, ignoredSet) {
+  const hasChildren = node.isDir && node.children && node.children.length > 0;
+  out.push({
+    id: node.id,
+    name: node.name,
+    absPath: node.absPath,
+    isDir: node.isDir,
+    hasChildren,
+    depth,
+    ignored: ignoredSet.has(node.absPath),
+  });
+
+  if (hasChildren && expanded.has(node.id)) {
+    for (const ch of node.children) {
+      flattenTree(ch, depth + 1, out, ignoredSet);
+    }
+  }
+}
+
+function _fileSearchMode(query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return null;
+  return {
+    query: q,
+    byPath: q.includes("/"),
+  };
+}
+
+function _nodeMatchesSearch(node, searchMode) {
+  if (!searchMode) return true;
+  const name = String(node.name || "").toLowerCase();
+  if (!searchMode.byPath) return name.includes(searchMode.query);
+
+  const relPath = String(node.relPath || node.absPath || node.name || "").replaceAll("\\", "/").toLowerCase();
+  return relPath.includes(searchMode.query);
+}
+
+function flattenTreeFiltered(node, depth, out, ignoredSet, searchMode) {
+  const hasChildren = node.isDir && node.children && node.children.length > 0;
+  const selfMatches = _nodeMatchesSearch(node, searchMode);
+  let childMatched = false;
+  const childRows = [];
+
+  if (hasChildren) {
+    for (const ch of node.children) {
+      if (flattenTreeFiltered(ch, depth + 1, childRows, ignoredSet, searchMode)) childMatched = true;
+    }
+  }
+
+  if (selfMatches || childMatched) {
+    out.push({
+      id: node.id,
+      name: node.name,
+      absPath: node.absPath,
+      isDir: node.isDir,
+      hasChildren,
+      depth,
+      ignored: ignoredSet.has(node.absPath),
+    });
+    if (childRows.length) out.push(...childRows);
+    return true;
+  }
+
+  return false;
+}
+
+function _updateFilesSearchUi() {
+  const wrap = el("filesSearchWrap");
+  const clearBtn = el("filesSearchClear");
+  const hasValue = String(filesSearchQuery || "").trim().length > 0;
+  if (wrap) wrap.classList.toggle("hasValue", hasValue);
+  if (clearBtn) clearBtn.style.display = hasValue ? "inline-flex" : "none";
+}
+
+function _setFilesSearchQuery(nextQuery) {
+  filesSearchQuery = String(nextQuery || "");
+  const input = el("filesSearchInput");
+  if (input && input.value !== filesSearchQuery) input.value = filesSearchQuery;
+  _updateFilesSearchUi();
+  if (lastSnapshot) render(lastSnapshot);
+}
+
+function _updateItemsCount(snapshot, visibleCount) {
+  const total = Number(snapshot?.stats?.items || 0);
+  const hasFilter = String(filesSearchQuery || "").trim().length > 0;
+  if (hasFilter && Number.isFinite(visibleCount)) {
+    el("itemsCount").textContent = `${visibleCount} / ${total} items`;
+    return;
+  }
+  el("itemsCount").textContent = `${total} items`;
+}
+
+function _virtualRange(total, rowH, viewportH, scrollTop, overscan) {
+  if (!total) return { start: 0, end: 0 };
+  const first = Math.floor(scrollTop / rowH);
+  const visible = Math.max(1, Math.ceil(viewportH / rowH));
+  const start = Math.max(0, first - overscan);
+  const end = Math.min(total, first + visible + overscan);
+  return { start, end };
+}
+
+function _normalizeAbsPath(p) {
+  return String(p || "").replaceAll("\\", "/");
+}
+
+function _isSelectedPath(absPath) {
+  const p = _normalizeAbsPath(absPath);
+  return _exportSelectionState.selected.has(p);
+}
+
+function _toggleSelectedPath(absPath) {
+  const p = _normalizeAbsPath(absPath);
+  if (!p) return;
+  if (_exportSelectionState.selected.has(p)) _exportSelectionState.selected.delete(p);
+  else _exportSelectionState.selected.add(p);
+}
+
+function _collectDescendantsFromSnapshot(snapshot, folderPathNormalized) {
+  const out = [];
+  if (!snapshot?.tree || !folderPathNormalized) return out;
+
+  let target = null;
+  const walkFind = (node) => {
+    if (!node || target) return;
+    if (_normalizeAbsPath(node.absPath) === folderPathNormalized) {
+      target = node;
+      return;
+    }
+    for (const ch of node.children || []) walkFind(ch);
+  };
+  walkFind(snapshot.tree);
+  if (!target) return out;
+
+  const walkDesc = (node) => {
+    if (!node) return;
+    for (const ch of node.children || []) {
+      out.push(_normalizeAbsPath(ch.absPath));
+      walkDesc(ch);
+    }
+  };
+  walkDesc(target);
+  return out;
+}
+
+function _collectSnapshotPathIndex(snapshot) {
+  const all = new Set();
+  const dirs = new Set();
+  const actualByNorm = new Map();
+  const walk = (node) => {
+    if (!node) return;
+    const actual = String(node.absPath || "");
+    const normalized = _normalizeAbsPath(actual);
+    all.add(normalized);
+    if (!actualByNorm.has(normalized)) actualByNorm.set(normalized, actual);
+    if (node.isDir || (Array.isArray(node.children) && node.children.length >= 0)) dirs.add(normalized);
+    for (const ch of node.children || []) walk(ch);
+  };
+  walk(snapshot?.tree || null);
+  return { all, dirs, actualByNorm };
+}
+
+function _applyFolderSelection(selectedSet, folderPathNormalized, isSelecting, descendantsList) {
+  if (!selectedSet || !folderPathNormalized) return;
+  const all = [folderPathNormalized, ...(descendantsList || [])];
+  if (isSelecting) {
+    for (const p of all) selectedSet.add(_normalizeAbsPath(p));
+  } else {
+    for (const p of all) selectedSet.delete(_normalizeAbsPath(p));
+  }
+}
+
+function _cleanupSelectionWithSnapshot(snapshot) {
+  try {
+    if (!snapshot?.projectPath) {
+      _exportSelectionState.selected.clear();
+      return;
+    }
+    const indexSet = new Set();
+    const walk = (node) => {
+      if (!node) return;
+      indexSet.add(_normalizeAbsPath(node.absPath));
+      if (Array.isArray(node.children)) node.children.forEach(walk);
+    };
+    walk(snapshot.tree);
+    const next = new Set();
+    for (const p of _exportSelectionState.selected) {
+      const pn = _normalizeAbsPath(p);
+      if (indexSet.has(pn)) next.add(pn);
+    }
+    _exportSelectionState.selected = next;
+  } catch {}
+}
+
+function _collectExportableFromSelection(snapshot) {
+  const ignoredSet = new Set(snapshot?.ignored || []);
+  const fileRows = [];
+  const walk = (n) => {
+    if (!n) return;
+    if (!n.isDir) {
+      fileRows.push({ absPath: String(n.absPath || "") });
+      return;
+    }
+    for (const ch of n.children || []) walk(ch);
+  };
+  walk(snapshot?.tree);
+  const out = new Set();
+  const selected = _exportSelectionState.selected;
+  const normSel = Array.from(selected).map((p) => _normalizeAbsPath(p));
+
+  for (const r of fileRows) {
+    if (ignoredSet.has(r.absPath)) continue;
+    const ext = path.extname(String(r.absPath || "")) || "";
+    if (DEFAULT_IGNORE_EXTS && DEFAULT_IGNORE_EXTS.has && DEFAULT_IGNORE_EXTS.has(ext)) continue;
+    const rp = _normalizeAbsPath(r.absPath);
+    let picked = selected.has(rp);
+    if (!picked) {
+      for (const s of normSel) {
+        if (!s) continue;
+        if (rp === s || rp.startsWith(s.endsWith("/") ? s : s + "/")) {
+          picked = true;
+          break;
+        }
+      }
+    }
+    if (picked) out.add(rp);
+  }
+  return out;
+}
+
+function _countExportableAll(snapshot) {
+  const ignoredSet = new Set(snapshot?.ignored || []);
+  let count = 0;
+  const walk = (n) => {
+    if (!n) return;
+    if (!n.isDir) {
+      const abs = String(n.absPath || "");
+      if (!ignoredSet.has(abs)) {
+        const ext = path.extname(abs) || "";
+        if (!(DEFAULT_IGNORE_EXTS && DEFAULT_IGNORE_EXTS.has && DEFAULT_IGNORE_EXTS.has(ext))) count += 1;
+      }
+      return;
+    }
+    for (const ch of n.children || []) walk(ch);
+  };
+  walk(snapshot?.tree);
+  return count;
+}
+
+function _collectExportableAll(snapshot) {
+  const ignoredSet = new Set(snapshot?.ignored || []);
+  const out = new Set();
+  const walk = (n) => {
+    if (!n) return;
+    if (!n.isDir) {
+      const abs = String(n.absPath || "");
+      if (!ignoredSet.has(abs)) {
+        const ext = path.extname(abs) || "";
+        if (!(DEFAULT_IGNORE_EXTS && DEFAULT_IGNORE_EXTS.has && DEFAULT_IGNORE_EXTS.has(ext))) {
+          out.add(_normalizeAbsPath(abs));
+        }
+      }
+      return;
+    }
+    for (const ch of n.children || []) walk(ch);
+  };
+  walk(snapshot?.tree);
+  return out;
+}
+
+function _safeRelForExport(root, abs) {
+  try {
+    return String(path.relative(String(root || ""), String(abs || "")) || path.basename(String(abs || ""))).replaceAll("\\", "/");
+  } catch {
+    return String(abs || "").replaceAll("\\", "/");
+  }
+}
+
+function _hashStable(input) {
+  try {
+    return crypto.createHash("sha1").update(String(input || ""), "utf8").digest("hex");
+  } catch {
+    return String(input || "");
+  }
+}
+
+function _buildExportSizeKey(snapshot, profile, resolvedAbs) {
+  const root = String(snapshot?.projectPath || "");
+  const rels = (resolvedAbs || []).map((p) => _safeRelForExport(root, p)).sort((a, b) => a.localeCompare(b));
+  const stats = snapshot?.stats || {};
+  const sigObj = {
+    root,
+    format: profile?.format || "txt",
+    scope: profile?.scope || "all",
+    content_level: profile?.content_level || "full",
+    include_tree: Boolean(profile?.include_tree),
+    include_hashes: Boolean(profile?.include_hashes),
+    include_ignored_summary: Boolean(profile?.include_ignored_summary),
+    sort_mode: profile?.sort_mode || "dir_first_alpha",
+    selected_count: _exportSelectionState.selected.size,
+    stats: {
+      files: Number(stats.files || 0),
+      folders: Number(stats.folders || 0),
+      ignoredFiles: Number(stats.ignoredFiles || 0),
+      ignoredFolders: Number(stats.ignoredFolders || 0),
+    },
+    rels,
+  };
+  return _hashStable(JSON.stringify(sigObj));
+}
+
+function _treeAddExportFile(root, relPath, fileIndex) {
+  const parts = String(relPath || "").split("/").filter(Boolean);
+  let cur = root;
+  for (let i = 0; i < parts.length; i++) {
+    const name = parts[i];
+    const isLast = i === parts.length - 1;
+    const pathRel = parts.slice(0, i + 1).join("/");
+    if (isLast) {
+      cur.children.push({ type: "file", name, path: pathRel, file_index: fileIndex });
+      return;
+    }
+    let next = cur.children.find((c) => c.type === "dir" && c.name === name);
+    if (!next) {
+      next = { type: "dir", name, path: pathRel, children: [] };
+      cur.children.push(next);
+    }
+    cur = next;
+  }
+}
+
+function _sortExportTree(node, sortMode = "dir_first_alpha") {
+  if (!node || !Array.isArray(node.children)) return;
+  for (const ch of node.children) _sortExportTree(ch, sortMode);
+  node.children.sort((a, b) => {
+    if (sortMode === "dir_first_alpha") {
+      const ta = a.type === "dir" ? 0 : 1;
+      const tb = b.type === "dir" ? 0 : 1;
+      if (ta !== tb) return ta - tb;
+    }
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
+}
+
+async function _readFileForExport(absPath, includeContent, includeHashes) {
+  let st = null;
+  try { st = await fs.promises.stat(absPath); } catch {}
+  const sizeBytes = Number(st?.size || 0);
+  const mtimeMs = Number.isFinite(Number(st?.mtimeMs)) ? Number(st.mtimeMs) : null;
+  if (!includeContent && !includeHashes) {
+    return {
+      size_bytes: sizeBytes,
+      mtime_ms: mtimeMs,
+      encoding: null,
+      line_count: null,
+      sha256: null,
+      content: null,
+      content_error: null,
+    };
+  }
+
+  try {
+    const buf = await fs.promises.readFile(absPath);
+    for (let i = 0; i < Math.min(buf.length, 4096); i++) {
+      if (buf[i] === 0) {
+        return {
+          size_bytes: sizeBytes,
+          mtime_ms: mtimeMs,
+          encoding: includeContent ? null : null,
+          line_count: includeContent ? null : null,
+          sha256: includeHashes ? null : null,
+          content: includeContent ? null : null,
+          content_error: includeContent ? "binary_or_decode_failed" : null,
+        };
+      }
+    }
+    const dec = new TextDecoder("utf-8", { fatal: true });
+    const content = dec.decode(buf);
+    const lineCount = content.length ? content.split(/\r?\n/).length : 0;
+    const hash = includeHashes ? crypto.createHash("sha256").update(String(content), "utf8").digest("hex") : null;
+    return {
+      size_bytes: sizeBytes,
+      mtime_ms: mtimeMs,
+      encoding: includeContent ? "utf-8" : null,
+      line_count: includeContent ? lineCount : null,
+      sha256: hash,
+      content: includeContent ? content : null,
+      content_error: includeContent ? null : null,
+    };
+  } catch {
+    return {
+      size_bytes: sizeBytes,
+      mtime_ms: mtimeMs,
+      encoding: includeContent ? null : null,
+      line_count: includeContent ? null : null,
+      sha256: includeHashes ? null : null,
+      content: includeContent ? null : null,
+      content_error: includeContent ? "binary_or_decode_failed" : null,
+    };
+  }
+}
+
+async function _buildUnifiedReportForSize(snapshot, profile, resolvedAbs) {
+  const root = String(snapshot?.projectPath || "");
+  const ignored = Array.from(new Set(snapshot?.ignored || []))
+    .map((p) => _safeRelForExport(root, p))
+    .sort((a, b) => a.localeCompare(b));
+  const includeContent = profile.content_level !== "compact";
+  const includeHashes = Boolean(profile.include_hashes);
+  const absList = Array.from(new Set(resolvedAbs || [])).sort((a, b) => a.localeCompare(b));
+  const files = [];
+
+  for (let i = 0; i < absList.length; i++) {
+    const absPath = absList[i];
+    const meta = await _readFileForExport(absPath, includeContent, includeHashes);
+    const relPath = _safeRelForExport(root, absPath);
+    files.push({
+      path: relPath,
+      ext: path.extname(relPath) || "",
+      size_bytes: meta.size_bytes,
+      mtime_ms: meta.mtime_ms,
+      encoding: meta.encoding,
+      line_count: meta.line_count,
+      sha256: meta.sha256,
+      content: meta.content,
+      content_error: meta.content_error,
+    });
+    if (i % 40 === 0) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  files.sort((a, b) => String(a.path || "").localeCompare(String(b.path || "")));
+
+  const tree = { type: "dir", name: ".", path: "", children: [] };
+  const byPath = {};
+  for (let i = 0; i < files.length; i++) {
+    const rel = String(files[i].path || "").replaceAll("\\", "/");
+    _treeAddExportFile(tree, rel, i);
+    byPath[rel] = i;
+  }
+  _sortExportTree(tree, profile.sort_mode);
+
+  return {
+    schema_version: 1,
+    report_type: "project_report",
+    project: {
+      path: root,
+      generated_at: new Date().toISOString(),
+      generator: "Project Manager & SV Patch",
+      app_version: null,
+    },
+    export: {
+      mode: profile.scope === "selected" ? "selected" : "all",
+      profile,
+      selected_count: profile.scope === "selected" ? _exportSelectionState.selected.size : 0,
+      exported_files_count: files.length,
+      filters: {
+        ignored_exts: Array.from(DEFAULT_IGNORE_EXTS).sort((a, b) => String(a).localeCompare(String(b))),
+        ignored_paths: ignored,
+      },
+    },
+    tree,
+    files,
+    index: { by_path: byPath },
+    project_path: root,
+    generated_at: new Date().toISOString().replace("T", " ").slice(0, 19),
+    ignored,
+  };
+}
+
+function _renderTxtFromReport(report, projectPath) {
+  const lines = [];
+  lines.push("PROJECT REPORT");
+  lines.push("=".repeat(72));
+  lines.push(`Project: ${report.project?.path || projectPath || ""}`);
+  lines.push(`Generated: ${report.project?.generated_at || report.generated_at || ""}`);
+  lines.push(`Mode: ${report.export?.mode || "all"}`);
+  lines.push(`Exported files: ${Number(report.export?.exported_files_count || report.files?.length || 0)}`);
+  lines.push("");
+
+  if (report.export?.profile?.include_tree !== false) {
+    lines.push("EXPORTED TREE");
+    lines.push("-".repeat(72));
+    const walkTree = (node, depth) => {
+      if (!node) return;
+      if (depth > 0) {
+        const pad = "  ".repeat(Math.max(0, depth - 1));
+        lines.push(`${pad}${node.name}${node.type === "dir" ? "/" : ""}`);
+      }
+      if (Array.isArray(node.children)) {
+        for (const ch of node.children) walkTree(ch, depth + 1);
+      }
+    };
+    walkTree(report.tree, 0);
+    lines.push("");
+  }
+
+  if (report.export?.profile?.include_ignored_summary !== false && Array.isArray(report.ignored) && report.ignored.length) {
+    lines.push("Ignored:");
+    for (const ig of report.ignored) lines.push(`- ${ig}`);
+    lines.push("");
+  }
+
+  const files = Array.isArray(report.files) ? report.files : [];
+  for (const file of files) {
+    lines.push("-".repeat(72));
+    lines.push(`File: ${file.path}`);
+    lines.push(`Ext: ${file.ext} · Bytes: ${file.size_bytes ?? 0} · Lines: ${file.line_count ?? "-"} · Encoding: ${file.encoding || "-"}`);
+    lines.push("");
+    if (typeof file.content === "string") lines.push(file.content);
+    else lines.push(`[Could not read: ${file.content_error || "binary_or_decode_failed"}]`);
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function _formatArchiveSizeText(status, bytes, hasError) {
+  if (status === "loading") return "Loading…";
+  if (typeof bytes === "number" && Number.isFinite(bytes)) {
+    const kb = bytes / 1024;
+    const bytesFmt = new Intl.NumberFormat().format(bytes);
+    return `${bytesFmt} bytes (${kb.toFixed(1)} KB)${hasError ? " (error)" : ""}`;
+  }
+  return hasError ? "Loading… (error)" : "Loading…";
+}
+
+function _scheduleExportSizeRecalc(snapshot, profile, resolvedAbs) {
+  if (!snapshot?.projectPath) return;
+  const key = _buildExportSizeKey(snapshot, profile, resolvedAbs);
+  _exportSizeState.key = key;
+
+  if (_exportSizeState.cache.has(key)) {
+    const bytes = _exportSizeState.cache.get(key);
+    _exportSizeState.status = "ready";
+    _exportSizeState.bytes = bytes;
+    _exportSizeState.lastStableBytes = bytes;
+    return;
+  }
+
+  if (_exportSizeState.debounceTimer) {
+    clearTimeout(_exportSizeState.debounceTimer);
+    _exportSizeState.debounceTimer = null;
+  }
+
+  const token = ++_exportSizeState.token;
+  _exportSizeState.status = "loading";
+
+  _exportSizeState.debounceTimer = setTimeout(async () => {
+    try {
+      const report = await _buildUnifiedReportForSize(snapshot, profile, resolvedAbs);
+      if (token !== _exportSizeState.token) return;
+      const rendered = profile.format === "json"
+        ? JSON.stringify(report, null, 2)
+        : _renderTxtFromReport(report, snapshot.projectPath);
+      const bytes = Buffer.byteLength(rendered, "utf8");
+      if (token !== _exportSizeState.token) return;
+      _exportSizeState.cache.set(key, bytes);
+      _exportSizeState.status = "ready";
+      _exportSizeState.bytes = bytes;
+      _exportSizeState.lastStableBytes = bytes;
+      _updateExportLiveSummary(snapshot);
+    } catch {
+      if (token !== _exportSizeState.token) return;
+      _exportSizeState.status = "error";
+      _exportSizeState.bytes = _exportSizeState.lastStableBytes;
+      _updateExportLiveSummary(snapshot);
+    }
+  }, 180);
+}
+
+function _buildExportProfile() {
+  return {
+    profile_id: "default",
+    format: _exportUi.type === "json" ? "json" : "txt",
+    scope: _exportSelectionState.selectedMode === "selected" ? "selected" : "all",
+    content_level: _exportUi.contentLevel === "compact" ? "compact" : "full",
+    include_tree: Boolean(_exportUi.options.treeHeader),
+    include_hashes: Boolean(_exportUi.options.hashes),
+    include_ignored_summary: Boolean(_exportUi.options.ignoredSummary),
+    sort_mode: _exportUi.options.sortDet === false ? "alpha" : "dir_first_alpha",
+    schema_version: 1,
+  };
+}
+
+function _updateExportSelectionMeta(snapshot) {
+  const countEl = el("exportSelectedCount");
+  const selectedCount = _exportSelectionState.selected.size;
+  const resolved = _collectExportableFromSelection(snapshot || lastSnapshot || {}).size;
+  if (countEl) countEl.textContent = `Selected: ${selectedCount} · Resolved files: ${resolved}`;
+  const countElTab = el("exportSelectedCountTab");
+  if (countElTab) countElTab.textContent = `Selected: ${selectedCount} · Resolved files: ${resolved}`;
+  _updateExportLiveSummary(snapshot);
+}
+
+function _writeExportSelectionConfig(snapshot) {
+  try {
+    const root = String(snapshot?.projectPath || "");
+    if (!root) return;
+    const cfgPath = path.join(root, _exportSelectionFile);
+    const payload = {
+      selectedOnly: _exportSelectionState.selectedMode === "selected",
+      selectedMode: _exportSelectionState.selectedMode,
+      profile: _buildExportProfile(),
+      selected: Array.from(_exportSelectionState.selected).map((p) => _normalizeAbsPath(p)),
+      updatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(cfgPath, JSON.stringify(payload, null, 2), "utf-8");
+  } catch {}
+}
+
+function _loadExportUiConfig() {
+  try {
+    const raw = localStorage.getItem("pm_sv_export_ui_v1");
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    if (obj?.type === "txt" || obj?.type === "json") _exportUi.type = obj.type;
+    if (["compact", "standard", "full"].includes(obj?.contentLevel)) _exportUi.contentLevel = obj.contentLevel;
+    if (obj && typeof obj.options === "object") {
+      _exportUi.options.treeHeader = Boolean(obj.options.treeHeader ?? _exportUi.options.treeHeader);
+      _exportUi.options.ignoredSummary = Boolean(obj.options.ignoredSummary ?? _exportUi.options.ignoredSummary);
+      _exportUi.options.hashes = Boolean(obj.options.hashes ?? _exportUi.options.hashes);
+      _exportUi.options.sortDet = Boolean(obj.options.sortDet ?? _exportUi.options.sortDet);
+    }
+  } catch {}
+}
+
+function _saveExportUiConfig() {
+  try {
+    localStorage.setItem("pm_sv_export_ui_v1", JSON.stringify(_exportUi));
+  } catch {}
+}
+
+function _setPresetFeedback(message, mode = "none") {
+  const fb = el("presetFeedback");
+  if (!fb) return;
+  fb.textContent = message || "Preset: idle";
+  fb.classList.remove("ok", "partial", "broken", "loading", "error", "cancel");
+  if (mode && mode !== "none") fb.classList.add(mode);
+}
+function _defaultPresetName() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `preset-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.pmspreset.json`;
+}
+
+function _setPresetFeedbackTimed(message, mode = "none", ttl = 4800) {
+  _setPresetFeedback(message, mode);
+  try { if (_exportPresetState.feedbackTimer) clearTimeout(_exportPresetState.feedbackTimer); } catch {}
+  if (mode === "loading") return;
+  _exportPresetState.feedbackTimer = setTimeout(() => {
+    if (_exportPresetState.lastPresetPath) {
+      _setPresetFeedback(`Preset file: ${path.basename(_exportPresetState.lastPresetPath)}`, "none");
+    } else {
+      _setPresetFeedback("Preset: idle", "none");
+    }
+  }, Math.max(1200, Number(ttl || 0)));
+}
+
+function _setPresetActionButtonsBusy(busy) {
+  const bSave = el("btnPresetSaveFile");
+  const bImport = el("btnPresetImportFile");
+  const menuBtn = el("btnPresetMenu");
+  const menuSave = el("presetMenuSave");
+  const menuImport = el("presetMenuImport");
+  if (bSave) bSave.disabled = !!busy;
+  if (bImport) bImport.disabled = !!busy;
+  if (menuBtn) menuBtn.disabled = !!busy;
+  if (menuSave) menuSave.disabled = !!busy;
+  if (menuImport) menuImport.disabled = !!busy;
+}
+
+function _setPresetMenuOpen(open) {
+  const menu = el("presetMenu");
+  const btn = el("btnPresetMenu");
+  _presetMenuState.open = Boolean(open);
+  if (menu) menu.hidden = !_presetMenuState.open;
+  if (btn) btn.setAttribute("aria-expanded", _presetMenuState.open ? "true" : "false");
+}
+
+function _bindPresetMenuUi() {
+  const menu = el("presetMenu");
+  const btn = el("btnPresetMenu");
+  const saveItem = el("presetMenuSave");
+  const importItem = el("presetMenuImport");
+
+  if (!menu || !btn || !saveItem || !importItem) {
+    console.error("[PRESET] menu elements missing", { menu: !!menu, btn: !!btn, saveItem: !!saveItem, importItem: !!importItem });
+    _setPresetFeedbackTimed("Error: preset menu UI unavailable", "error", 4200);
+    return;
+  }
+
+  _bindClickSafe("btnPresetMenu", async () => {
+    _setPresetMenuOpen(!_presetMenuState.open);
+  }, { required: false });
+
+  _bindClickSafe("presetMenuSave", () => {
+    _setPresetMenuOpen(false);
+    el("btnPresetSaveFile")?.click();
+  }, { required: false });
+  _bindClickSafe("presetMenuImport", () => {
+    _setPresetMenuOpen(false);
+    el("btnPresetImportFile")?.click();
+  }, { required: false });
+
+  document.addEventListener("click", (ev) => {
+    if (!_presetMenuState.open) return;
+    const host = el("presetQuickControls");
+    if (host && !host.contains(ev.target)) _setPresetMenuOpen(false);
+  }, true);
+
+  window.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && _presetMenuState.open) _setPresetMenuOpen(false);
+  });
+}
+
+// Backward compatibility shim for legacy preset UI calls.
+function _refreshPresetControlsUi() {
+  _setPresetActionButtonsBusy(Boolean(_exportPresetState.applying));
+  if (_exportPresetState.lastPresetPath) {
+    _setPresetFeedback(`Preset file: ${path.basename(_exportPresetState.lastPresetPath)}`, "none");
+  } else {
+    _setPresetFeedback("Preset: idle", "none");
+  }
+}
+
+function _markPresetRefreshCycle() {
+  try {
+    _exportPresetState.applyToken = Number(_exportPresetState.applyToken || 0) + 1;
+  } catch {}
+}
+
+function _maybeAutoApplyPreset(_snapshot) {
+  // File-based preset workflow is explicit/manual-only.
+  // Keep as compatibility no-op so legacy call sites cannot throw.
+  return false;
+}
+
+function _buildPresetV1(snapshot) {
+  const selected = _normalizePathList(Array.from(_exportSelectionState.selected || []));
+  const hidden = _normalizePathList(snapshot?.ignored || []);
+  return {
+    schema_version: "preset.v1",
+    created_at: new Date().toISOString(),
+    project_root: String(snapshot?.projectPath || ""),
+    export: {
+      profile: _sanitizeExportProfileForPreset(_buildExportProfile()),
+      scope: {
+        mode: _exportSelectionState.selectedMode === "selected" ? "selected" : "all",
+        selected,
+      },
+      hidden_paths: hidden,
+    },
+    tree: {
+      expanded_paths: _normalizePathList(Array.from(expandedPaths || [])),
+    },
+  };
+}
+
+
+function _sanitizeExportProfileForPreset(profile) {
+  const p = { ...(profile || {}) };
+  if (Object.prototype.hasOwnProperty.call(p, "schema_version")) {
+    p.export_schema_version = p.schema_version;
+    delete p.schema_version;
+  }
+  return p;
+}
 
 function _normalizePathList(list, projectRoot = "") {
   if (!Array.isArray(list)) return [];
@@ -6601,6 +7436,11 @@ async function _confirmApplyFromDiffModal() {
 }
 
 function bind() {
+  if (__uiBindRan) {
+    if (__PM_UI_DEV__) console.warn("[UI] bind() called more than once; skipping duplicate binding");
+    return;
+  }
+  __uiBindRan = true;
   _loadExportUiConfig();
   try{
     const prof = _buildExportProfile();
@@ -6940,6 +7780,7 @@ function bind() {
 
   _refreshPresetControlsUi();
   _reportUiBindHealth();
+  _runUiGlobalHitTestReport();
 
 }
 

@@ -1,4 +1,4 @@
-/* @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback files-header-sticky breadcrumb selected-row-kbnav. */
+/* @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback files-header-sticky breadcrumb selected-row-kbnav header-hit-area. */
 /*
 PM-SV-PATCH META
 Version: pm-svpatch-ui@2026.02.11-r1
@@ -1591,6 +1591,7 @@ body:not(.kbNav) .panel.files .row:focus{
 
 .panel.files .panelHeadTools{
   margin-left:auto;
+  pointer-events:auto;
 }
 
 .panel.files .fileList{

@@ -102,6 +102,21 @@
             <button class="actionBtn headBtn" id="btnRefreshFiles" title="Refresh files">
               <svg class="ico"><use href="#icon-refresh"></use></svg>
             </button>
+            <div class="presetQuick" id="presetQuickControls">
+              <label class="presetLabel" for="exportPresetSelect">Preset</label>
+              <select id="exportPresetSelect" class="presetSelect" aria-label="Export preset">
+                <option value="">None</option>
+              </select>
+              <button class="btn secondary tiny" id="btnPresetSave" type="button">Save</button>
+              <button class="btn secondary tiny" id="btnPresetApply" type="button">Apply</button>
+              <div class="presetAutoWrap">
+                <span class="presetAutoLabel">Auto-apply on refresh</span>
+                <label class="exportSelSwitch" aria-label="Auto-apply on refresh">
+                  <input type="checkbox" id="chkPresetAutoApply" aria-label="Auto-apply on refresh" checked />
+                  <span class="exportSelSlider" aria-hidden="true"></span>
+                </label>
+              </div>
+            </div>
           </div>
           <div class="panelHeadTools">
             <div class="filesSearchWrap" id="filesSearchWrap">
@@ -110,6 +125,7 @@
             </div>
           </div>
           <div class="panelMeta" id="itemsCount">0 items</div>
+          <div class="panelMeta presetFeedback" id="presetFeedback">Preset: None</div>
         </div>
 
         <div class="fileList" id="fileList"></div>

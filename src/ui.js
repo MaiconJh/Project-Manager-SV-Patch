@@ -1,4 +1,4 @@
-// @context: export-ui-sync right-panel-tabs context-anchor-enforcement
+// @context: export-presets auto-apply refresh tree-state selection-profile
 /*
 PM-SV-PATCH META
 Version: pm-svpatch-ui@2026.02.11-r1
@@ -48,6 +48,18 @@ const _exportUi = {
     sortDet: true,
   },
 };
+const _exportPresetStorageKey = "pm_sv_export_presets_v1";
+const _exportPresetState = {
+  presets: [],
+  selectedId: "",
+  autoApply: true,
+  applying: false,
+  applyToken: 0,
+  refreshCycleToken: 0,
+  pendingAutoApply: false,
+  lastAppliedCycleToken: 0,
+  lastHealth: "none", // none | ok | partial | broken
+};
 
 const _applyDiffState = {
   open: false,
@@ -89,6 +101,7 @@ function _scheduleAutoRefresh(reason) {
 
     try {
       b?.classList?.add("busy");
+      _markPresetRefreshCycle();
       showToast("Auto-refresh: changes detected…", { type: "info", ttl: 1400 });
       await ipcRenderer.invoke("project:refresh");
       showToast("Auto-refresh: files updated.", { type: "success", ttl: 1600 });
@@ -1331,6 +1344,9 @@ function syncExpandedIdsFromPaths(tree){
       if(n.children && n.children.length) n.children.forEach(walk);
     };
     walk(tree);
+    for(const p of Array.from(expandedPaths)){
+      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
+    }
   }catch{}
 }
 
@@ -1963,6 +1979,258 @@ function _saveExportUiConfig() {
   } catch {}
 }
 
+function _loadExportPresetsConfig() {
+  try {
+    const raw = localStorage.getItem(_exportPresetStorageKey);
+    if (!raw) return;
+    const obj = JSON.parse(raw || "{}");
+    const presets = Array.isArray(obj?.presets) ? obj.presets : [];
+    _exportPresetState.presets = presets.filter((p) => p && typeof p === "object");
+    _exportPresetState.selectedId = String(obj?.selectedId || "");
+    _exportPresetState.autoApply = obj?.autoApply !== false;
+  } catch {}
+}
+
+function _saveExportPresetsConfig() {
+  try {
+    const payload = {
+      selectedId: _exportPresetState.selectedId,
+      autoApply: Boolean(_exportPresetState.autoApply),
+      presets: _exportPresetState.presets,
+      updatedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(_exportPresetStorageKey, JSON.stringify(payload));
+  } catch {}
+}
+
+function _collectSnapshotPathIndex(snapshot) {
+  const all = new Set();
+  const dirs = new Set();
+  const files = new Set();
+  const walk = (n) => {
+    if (!n) return;
+    const abs = _normalizeAbsPath(n.absPath);
+    if (abs) {
+      all.add(abs);
+      if (n.isDir) dirs.add(abs);
+      else files.add(abs);
+    }
+    for (const ch of n.children || []) walk(ch);
+  };
+  walk(snapshot?.tree);
+  return { all, dirs, files };
+}
+
+function _markPresetRefreshCycle() {
+  _exportPresetState.refreshCycleToken += 1;
+  _exportPresetState.pendingAutoApply = true;
+}
+
+function _setPresetFeedback(message, mode = "none") {
+  const fb = el("presetFeedback");
+  if (!fb) return;
+  fb.textContent = message || "Preset: None";
+  fb.classList.remove("ok", "partial", "broken", "loading");
+  if (mode && mode !== "none") fb.classList.add(mode);
+}
+
+function _refreshPresetControlsUi() {
+  const sel = el("exportPresetSelect");
+  if (sel) {
+    const current = _exportPresetState.selectedId || "";
+    const options = ['<option value="">None</option>'];
+    for (const p of _exportPresetState.presets) {
+      const id = String(p?.id || "");
+      const name = String(p?.name || "Preset");
+      if (!id) continue;
+      const selected = id === current ? ' selected' : '';
+      options.push(`<option value="${id}"${selected}>${name}</option>`);
+    }
+    sel.innerHTML = options.join("");
+    sel.value = current;
+  }
+  const auto = el("chkPresetAutoApply");
+  if (auto) auto.checked = Boolean(_exportPresetState.autoApply);
+
+  const applyBtn = el("btnPresetApply");
+  const saveBtn = el("btnPresetSave");
+  const disable = _exportPresetState.applying;
+  if (applyBtn) applyBtn.disabled = disable;
+  if (saveBtn) saveBtn.disabled = disable;
+  if (!_exportPresetState.selectedId) _setPresetFeedback("Preset: None", "none");
+}
+
+function _buildCurrentPresetDraft(snapshot) {
+  const normalizedSelected = Array.from(_exportSelectionState.selected || []).map((p) => _normalizeAbsPath(p));
+  const expanded = Array.from(expandedPaths || []).map((p) => _normalizeAbsPath(p));
+  const list = el("fileList");
+  return {
+    schema_version: "export_preset_v1",
+    project_path: String(snapshot?.projectPath || ""),
+    export_profile: _buildExportProfile(),
+    selection: {
+      mode: _exportSelectionState.selectedMode === "selected" ? "selected" : "all",
+      paths: normalizedSelected,
+    },
+    tree_view: {
+      expanded_paths: expanded,
+      scroll_hint: Number.isFinite(Number(list?.scrollTop)) ? Number(list.scrollTop) : 0,
+    },
+    rehydration: {
+      apply_on_refresh: Boolean(_exportPresetState.autoApply),
+      cleanup_missing_paths: true,
+    },
+  };
+}
+
+function _evaluatePresetHealth(preset, snapshot) {
+  const idx = _collectSnapshotPathIndex(snapshot || {});
+  const selectionPaths = Array.isArray(preset?.selection?.paths) ? preset.selection.paths.map((p) => _normalizeAbsPath(p)) : [];
+  const expanded = Array.isArray(preset?.tree_view?.expanded_paths) ? preset.tree_view.expanded_paths.map((p) => _normalizeAbsPath(p)) : [];
+  const missingSelection = selectionPaths.filter((p) => p && !idx.all.has(p));
+  const missingExpanded = expanded.filter((p) => p && !idx.dirs.has(p));
+  const mismatch = Boolean(preset?.project_path && snapshot?.projectPath && preset.project_path !== snapshot.projectPath);
+  const status = mismatch ? "broken" : ((missingSelection.length || missingExpanded.length) ? "partial" : "ok");
+  return {
+    status,
+    missingSelection,
+    missingExpanded,
+    selectedCount: selectionPaths.length,
+    expandedCount: expanded.length,
+  };
+}
+
+function _applyExportProfileToUi(profile) {
+  if (!profile || typeof profile !== "object") return;
+  _exportUi.type = profile.format === "json" ? "json" : "txt";
+  _exportUi.contentLevel = profile.content_level === "compact" ? "compact" : "full";
+  _exportUi.options.treeHeader = Boolean(profile.include_tree);
+  _exportUi.options.ignoredSummary = Boolean(profile.include_ignored_summary);
+  _exportUi.options.hashes = Boolean(profile.include_hashes);
+  _exportUi.options.sortDet = profile.sort_mode !== "alpha";
+  _syncExportUiControls();
+  _saveExportUiConfig();
+}
+
+async function _applyPreset(preset, snapshot, reason = "manual") {
+  if (!preset || !snapshot) return;
+  const token = ++_exportPresetState.applyToken;
+  _exportPresetState.applying = true;
+  _refreshPresetControlsUi();
+  _setPresetFeedback(`Applying preset: ${preset.name || "Preset"}… Loading…`, "loading");
+
+  try {
+    const health = _evaluatePresetHealth(preset, snapshot);
+    const cleanupMissing = preset?.rehydration?.cleanup_missing_paths !== false;
+
+    if (health.status === "broken" && reason === "auto-refresh") {
+      _exportPresetState.lastHealth = "broken";
+      _setPresetFeedback(`Broken: project mismatch for preset ${preset.name || "Preset"}`, "broken");
+      return;
+    }
+
+    const idx = _collectSnapshotPathIndex(snapshot);
+    const expandedSrc = Array.isArray(preset?.tree_view?.expanded_paths) ? preset.tree_view.expanded_paths : [];
+    const expandedNorm = expandedSrc.map((p) => _normalizeAbsPath(p)).filter(Boolean);
+    expandedPaths.clear();
+    for (const p of expandedNorm) {
+      if (!cleanupMissing || idx.dirs.has(p)) expandedPaths.add(p);
+    }
+
+    _exportSelectionState.selectedMode = preset?.selection?.mode === "selected" ? "selected" : "all";
+    _exportSelectionState.selected.clear();
+    const selectionSrc = Array.isArray(preset?.selection?.paths) ? preset.selection.paths : [];
+    for (const p0 of selectionSrc) {
+      const p = _normalizeAbsPath(p0);
+      if (!p) continue;
+      if (cleanupMissing && !idx.all.has(p)) continue;
+      _exportSelectionState.selected.add(p);
+      if (idx.dirs.has(p)) {
+        const descendants = _collectDescendantsFromSnapshot(snapshot, p);
+        for (const d of descendants) {
+          const dn = _normalizeAbsPath(d);
+          if (!cleanupMissing || idx.all.has(dn)) _exportSelectionState.selected.add(dn);
+        }
+      }
+    }
+
+    _applyExportProfileToUi(preset.export_profile || {});
+
+    if (token !== _exportPresetState.applyToken) return;
+
+    const mainChk = el("chkExportSelectedOnly");
+    const tabChk = el("chkExportSelectedOnlyTab");
+    const isSel = _exportSelectionState.selectedMode === "selected";
+    if (mainChk) mainChk.checked = isSel;
+    if (tabChk) tabChk.checked = isSel;
+
+    render(snapshot);
+
+    const scrollHint = Number(preset?.tree_view?.scroll_hint);
+    if (Number.isFinite(scrollHint)) {
+      const list = el("fileList");
+      if (list) list.scrollTop = Math.max(0, scrollHint);
+    }
+
+    _updateExportSelectionMeta(snapshot);
+    if (snapshot?.projectPath) _writeExportSelectionConfig(snapshot);
+    _saveExportPresetsConfig();
+
+    const appliedSelected = _exportSelectionState.selected.size;
+    const resolved = _collectExportableFromSelection(snapshot).size;
+    _exportPresetState.lastHealth = health.status;
+    const mode = health.status === "ok" ? "ok" : (health.status === "broken" ? "broken" : "partial");
+    const msg = health.status === "partial"
+      ? `Applied: ${preset.name || "Preset"} · Partial (${health.missingSelection.length + health.missingExpanded.length} missing) · expanded ${expandedPaths.size} · selected ${health.selectedCount} → ${resolved}`
+      : `Applied: ${preset.name || "Preset"} · expanded ${expandedPaths.size} · selected ${health.selectedCount} → ${resolved}`;
+    _setPresetFeedback(msg, mode);
+  } catch (e) {
+    _setPresetFeedback(`Apply failed: ${e?.message || e}`, "broken");
+  } finally {
+    if (token === _exportPresetState.applyToken) {
+      _exportPresetState.applying = false;
+      _refreshPresetControlsUi();
+    }
+  }
+}
+
+function _savePresetByName(name, snapshot) {
+  const n = String(name || "").trim();
+  if (!n || !snapshot?.projectPath) return;
+  const draft = _buildCurrentPresetDraft(snapshot);
+  const id = `${n.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${Date.now()}`;
+  const preset = {
+    id,
+    name: n,
+    updated_at: new Date().toISOString(),
+    ...draft,
+  };
+  _exportPresetState.presets = (_exportPresetState.presets || []).filter((p) => p && p.name !== n);
+  _exportPresetState.presets.unshift(preset);
+  _exportPresetState.selectedId = id;
+  _saveExportPresetsConfig();
+  _refreshPresetControlsUi();
+  _setPresetFeedback(`Saved preset: ${n}`, "ok");
+}
+
+async function _applySelectedPresetNow(snapshot, reason = "manual") {
+  const id = _exportPresetState.selectedId;
+  const preset = (_exportPresetState.presets || []).find((p) => String(p?.id || "") === String(id || ""));
+  if (!preset || !snapshot) return;
+  await _applyPreset(preset, snapshot, reason);
+}
+
+async function _maybeAutoApplyPreset(snapshot) {
+  if (!_exportPresetState.autoApply) return;
+  if (!_exportPresetState.pendingAutoApply) return;
+  if (_exportPresetState.lastAppliedCycleToken === _exportPresetState.refreshCycleToken) return;
+  if (!_exportPresetState.selectedId) return;
+
+  _exportPresetState.pendingAutoApply = false;
+  _exportPresetState.lastAppliedCycleToken = _exportPresetState.refreshCycleToken;
+  await _applySelectedPresetNow(snapshot, "auto-refresh");
+}
+
 function _syncExportUiControls() {
   const typeTxt = el("btnExportTypeTxt");
   const typeJson = el("btnExportTypeJson");
@@ -2353,6 +2621,17 @@ try{
   _fileRowsSnapshot = snapshot;
   _renderVirtualFileRows(list, rows, snapshot);
   _updateExportSelectionMeta(snapshot);
+
+  _refreshPresetControlsUi();
+  if (!_exportPresetState.applying && _exportPresetState.selectedId) {
+    const preset = (_exportPresetState.presets || []).find((p) => String(p?.id || "") === String(_exportPresetState.selectedId));
+    if (preset) {
+      const h = _evaluatePresetHealth(preset, snapshot);
+      if (h.status === "broken") _setPresetFeedback(`Broken: preset ${preset.name || "Preset"} is for another project`, "broken");
+      else if (h.status === "partial") _setPresetFeedback(`Preset ${preset.name || "Preset"}: Partial (${h.missingSelection.length + h.missingExpanded.length} missing paths)`, "partial");
+      else _setPresetFeedback(`Preset ${preset.name || "Preset"}: OK`, "ok");
+    }
+  }
 }
 
 function _previewActionLabel(action) {
@@ -3060,11 +3339,13 @@ async function _confirmApplyFromDiffModal() {
 
 function bind() {
   _loadExportUiConfig();
+  _loadExportPresetsConfig();
   try{
     const prof = _buildExportProfile();
     _exportSelectionState.selectedMode = prof.scope === "selected" ? "selected" : "all";
   }catch{}
   setTabs();
+  _refreshPresetControlsUi();
   _bindFileListVirtualEvents();
 
   const filesSearchInput = el("filesSearchInput");
@@ -3104,6 +3385,7 @@ function bind() {
 
     try {
       b?.classList?.add("busy");
+      _markPresetRefreshCycle();
       showToast("Refreshing files…", { type: "info", ttl: 1600 });
 
       const res = await ipcRenderer.invoke("project:refresh");
@@ -3210,6 +3492,33 @@ function bind() {
   _bindOpt("optSortDet", "sortDet");
   _syncExportUiControls();
   _updateExportLiveSummary(lastSnapshot);
+
+  el("exportPresetSelect")?.addEventListener("change", (ev) => {
+    _exportPresetState.selectedId = String(ev?.target?.value || "");
+    _saveExportPresetsConfig();
+    _refreshPresetControlsUi();
+    if (_exportPresetState.selectedId) {
+      const p = (_exportPresetState.presets || []).find((x) => String(x?.id || "") === _exportPresetState.selectedId);
+      if (p) _setPresetFeedback(`Selected preset: ${p.name}`, "none");
+    }
+  });
+
+  el("chkPresetAutoApply")?.addEventListener("change", (ev) => {
+    _exportPresetState.autoApply = Boolean(ev?.target?.checked);
+    _saveExportPresetsConfig();
+    _refreshPresetControlsUi();
+  });
+
+  el("btnPresetSave")?.addEventListener("click", () => {
+    const fallback = ((_exportPresetState.presets || [])[0]?.name || "").trim();
+    const name = window.prompt("Preset name", fallback || "My preset");
+    if (!name) return;
+    _savePresetByName(name, lastSnapshot);
+  });
+
+  el("btnPresetApply")?.addEventListener("click", async () => {
+    await _applySelectedPresetNow(lastSnapshot, "manual");
+  });
 
   el("btnExportTxt").addEventListener("click", async () => {
     const chk = el("chkExportSelectedOnly");
@@ -3387,6 +3696,7 @@ function bind() {
 // IPC events
 ipcRenderer.on("state:update", (_, snapshot) => {
   render(snapshot);
+  _maybeAutoApplyPreset(snapshot);
 });
 
 ipcRenderer.on("log:append", (_, line) => {
@@ -3407,6 +3717,7 @@ ipcRenderer.on("watcher:changed", (_ev, payload) => {
 
 // bootstrap
 bind();
+_markPresetRefreshCycle();
 ipcRenderer.invoke("ui:refresh");
 
 

@@ -2082,7 +2082,54 @@ body.has-apply-diff .applyDiffModal{
   align-items:center;
   gap:6px;
   flex-wrap:wrap;
+  position:relative;
 }
+.presetMenuBtn{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  white-space:nowrap;
+  padding:4px 10px;
+}
+.uiIcon{
+  width:16px;
+  height:16px;
+  flex:0 0 auto;
+  color:currentColor;
+}
+.uiIconChevron{ width:14px; height:14px; opacity:.8; }
+.presetMenu{
+  position:absolute;
+  top:calc(100% + 6px);
+  left:0;
+  min-width:178px;
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:rgba(13,17,23,.98);
+  box-shadow:0 8px 24px rgba(0,0,0,.35);
+  padding:4px;
+  z-index:35;
+}
+.presetMenuItem{
+  width:100%;
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding:7px 8px;
+  border:0;
+  border-radius:6px;
+  color:var(--text);
+  background:transparent;
+  cursor:pointer;
+  text-align:left;
+  white-space:nowrap;
+}
+.presetMenuItem:hover,
+.presetMenuItem:focus-visible{
+  outline:none;
+  background:rgba(56,139,253,.16);
+}
+.presetLegacyBtn{ display:none !important; }
 .presetLabel{
   font-size:11px;
   color:var(--muted);

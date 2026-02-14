@@ -111,8 +111,38 @@ Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2
               <svg class="ico"><use href="#icon-refresh"></use></svg>
             </button>
             <div class="presetQuick" id="presetQuickControls">
-              <button class="btn secondary tiny" id="btnPresetSaveFile" type="button">Save preset…</button>
-              <button class="btn secondary tiny" id="btnPresetImportFile" type="button">Import preset…</button>
+              <button class="btn secondary tiny presetMenuBtn" id="btnPresetMenu" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="presetMenu">
+                <svg class="uiIcon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M2.5 5.5h8"></path>
+                  <path d="m8 3 2.5 2.5L8 8"></path>
+                  <path d="M13.5 10.5h-8"></path>
+                  <path d="m8 8 2.5 2.5L8 13"></path>
+                </svg>
+                <span>Preset</span>
+                <svg class="uiIcon uiIconChevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="m4.5 6.5 3.5 3.5 3.5-3.5"></path>
+                </svg>
+              </button>
+              <div class="presetMenu" id="presetMenu" role="menu" aria-label="Preset actions" hidden>
+                <button class="presetMenuItem" id="presetMenuSave" type="button" role="menuitem">
+                  <svg class="uiIcon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M8 2.5v7"></path>
+                    <path d="m5.5 7 2.5 2.5L10.5 7"></path>
+                    <path d="M3 11.5h10"></path>
+                  </svg>
+                  <span>Save preset…</span>
+                </button>
+                <button class="presetMenuItem" id="presetMenuImport" type="button" role="menuitem">
+                  <svg class="uiIcon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M8 13.5v-7"></path>
+                    <path d="m5.5 9 2.5-2.5L10.5 9"></path>
+                    <path d="M3 4.5h10"></path>
+                  </svg>
+                  <span>Import preset…</span>
+                </button>
+              </div>
+              <button class="btn secondary tiny presetLegacyBtn" id="btnPresetSaveFile" type="button">Save preset…</button>
+              <button class="btn secondary tiny presetLegacyBtn" id="btnPresetImportFile" type="button">Import preset…</button>
             </div>
           </div>
           <div class="panelHeadTools">

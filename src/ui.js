@@ -139,6 +139,9 @@ const _exportPresetState = {
 };
 
 const _stateUpdateWaiters = [];
+const _presetMenuState = {
+  open: false,
+};
 
 
 const _applyDiffState = {
@@ -2102,8 +2105,58 @@ function _setPresetFeedbackTimed(message, mode = "none", ttl = 4800) {
 function _setPresetActionButtonsBusy(busy) {
   const bSave = el("btnPresetSaveFile");
   const bImport = el("btnPresetImportFile");
+  const menuBtn = el("btnPresetMenu");
+  const menuSave = el("presetMenuSave");
+  const menuImport = el("presetMenuImport");
   if (bSave) bSave.disabled = !!busy;
   if (bImport) bImport.disabled = !!busy;
+  if (menuBtn) menuBtn.disabled = !!busy;
+  if (menuSave) menuSave.disabled = !!busy;
+  if (menuImport) menuImport.disabled = !!busy;
+}
+
+function _setPresetMenuOpen(open) {
+  const menu = el("presetMenu");
+  const btn = el("btnPresetMenu");
+  _presetMenuState.open = Boolean(open);
+  if (menu) menu.hidden = !_presetMenuState.open;
+  if (btn) btn.setAttribute("aria-expanded", _presetMenuState.open ? "true" : "false");
+}
+
+function _bindPresetMenuUi() {
+  const menu = el("presetMenu");
+  const btn = el("btnPresetMenu");
+  const saveItem = el("presetMenuSave");
+  const importItem = el("presetMenuImport");
+
+  if (!menu || !btn || !saveItem || !importItem) {
+    console.error("[PRESET] menu elements missing", { menu: !!menu, btn: !!btn, saveItem: !!saveItem, importItem: !!importItem });
+    _setPresetFeedbackTimed("Error: preset menu UI unavailable", "error", 4200);
+    return;
+  }
+
+  _bindClickSafe("btnPresetMenu", async () => {
+    _setPresetMenuOpen(!_presetMenuState.open);
+  }, { required: false });
+
+  saveItem.addEventListener("click", () => {
+    _setPresetMenuOpen(false);
+    el("btnPresetSaveFile")?.click();
+  });
+  importItem.addEventListener("click", () => {
+    _setPresetMenuOpen(false);
+    el("btnPresetImportFile")?.click();
+  });
+
+  document.addEventListener("click", (ev) => {
+    if (!_presetMenuState.open) return;
+    const host = el("presetQuickControls");
+    if (host && !host.contains(ev.target)) _setPresetMenuOpen(false);
+  }, true);
+
+  window.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && _presetMenuState.open) _setPresetMenuOpen(false);
+  });
 }
 
 // Backward compatibility shim for legacy preset UI calls.
@@ -3710,6 +3763,8 @@ function bind() {
   _bindClickSafe("btnPresetImportFile", async () => {
     await _importPresetFromFile(lastSnapshot);
   });
+
+  _bindPresetMenuUi();
 
 
   _bindClickSafe("btnExportTxt", async () => {

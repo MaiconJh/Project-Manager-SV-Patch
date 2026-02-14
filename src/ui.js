@@ -1163,6 +1163,27 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     _scheduleFindRebuild(card);
   });
 
+  card.querySelector("[data-replace-next]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    _replaceCurrentFind(card);
+  });
+
+  card.querySelector("[data-replace-all]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const total = _replaceAllFind(card);
+    if (total > 0) addLog(`[FILE_EDIT] Replaced ${total} match(es) in ${relPath || absPath}`);
+  });
+
+  card.querySelector("[data-find-case]")?.addEventListener("change", () => {
+    if (!_findOpen) return;
+    _scheduleFindRebuild(card);
+  });
+
+  card.querySelector("[data-find-word]")?.addEventListener("change", () => {
+    if (!_findOpen) return;
+    _scheduleFindRebuild(card);
+  });
+
   // expose cancel for global ESC handling
   card._cancelEditWithConfirm = cancelEditWithConfirm;
 

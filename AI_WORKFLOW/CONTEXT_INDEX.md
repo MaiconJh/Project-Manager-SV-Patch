@@ -47,3 +47,4 @@ Semantic registry grouped by subsystem.
 
 - ai-workflow-protocol
 - context-anchor-header
+- context-anchor-enforcement

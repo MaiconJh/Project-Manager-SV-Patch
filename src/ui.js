@@ -1,3 +1,4 @@
+// @context: export-ui-sync right-panel-tabs context-anchor-enforcement
 /*
 PM-SV-PATCH META
 Version: pm-svpatch-ui@2026.02.11-r1

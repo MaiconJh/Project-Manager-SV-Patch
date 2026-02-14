@@ -14,6 +14,28 @@ const { TextDecoder } = require("util");
 const { DEFAULT_IGNORE_EXTS } = require("./config");
 const el = (id) => document.getElementById(id);
 
+const __PM_UI_DEV__ = !process?.env || process.env.NODE_ENV !== "production";
+const __PM_UI_TRACE_CLICKS__ = __PM_UI_DEV__ && process?.env?.PM_UI_TRACE_CLICKS === "1";
+function _uiDevLog(msg, err) {
+  try { if (typeof addLog === "function") addLog(`[UI] ${msg}${err ? ` :: ${err?.message || err}` : ""}`); } catch {}
+  try { if (err) console.error(`[UI] ${msg}`, err); else console.warn(`[UI] ${msg}`); } catch {}
+}
+function _bindClickSafe(id, handler, opts = {}) {
+  const node = el(id);
+  if (!node) {
+    if (__PM_UI_DEV__ && opts.required !== false) _uiDevLog(`missing element for click binding: #${id}`);
+    return;
+  }
+  node.addEventListener("click", async (ev) => {
+    try {
+      await handler(ev);
+    } catch (e) {
+      _uiDevLog(`click handler failed: #${id}`, e);
+      showToast(`Action failed (${id})`, { type: "error", ttl: 2600 });
+    }
+  });
+}
+
 const expanded = new Set();
 const expandedPaths = new Set(); // absPath set to preserve expanded state across refreshes
 let selectedId = null;
@@ -1339,6 +1361,9 @@ function syncExpandedIdsFromPaths(tree){
       if(n.children && n.children.length) n.children.forEach(walk);
     };
     walk(tree);
+    for(const p of Array.from(expandedPaths)){
+      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
+    }
   }catch{}
 }
 
@@ -3341,11 +3366,11 @@ function bind() {
 
   _updateFilesSearchUi();
 
-  el("btnOpen").addEventListener("click", async () => {
+  _bindClickSafe("btnOpen", async () => {
     await ipcRenderer.invoke("project:open");
   });
 
-  el("btnRefreshFiles").addEventListener("click", async () => {
+  _bindClickSafe("btnRefreshFiles", async () => {
     const b = el("btnRefreshFiles");
     if (b?.classList?.contains("busy")) return;
 
@@ -3369,11 +3394,11 @@ function bind() {
     }
   });
 
-  el("btnHelp").addEventListener("click", async () => {
+  _bindClickSafe("btnHelp", async () => {
     await ipcRenderer.invoke("ui:help");
   });
 
-  el("btnClearIgnored").addEventListener("click", async () => {
+  _bindClickSafe("btnClearIgnored", async () => {
     await ipcRenderer.invoke("tree:clearIgnored");
   });
 
@@ -3459,16 +3484,16 @@ function bind() {
   _syncExportUiControls();
   _updateExportLiveSummary(lastSnapshot);
 
-  el("btnPresetSaveFile")?.addEventListener("click", async () => {
+  _bindClickSafe("btnPresetSaveFile", async () => {
     await _savePresetToFile(lastSnapshot);
   });
 
-  el("btnPresetImportFile")?.addEventListener("click", async () => {
+  _bindClickSafe("btnPresetImportFile", async () => {
     await _importPresetFromFile(lastSnapshot);
   });
 
 
-  el("btnExportTxt").addEventListener("click", async () => {
+  _bindClickSafe("btnExportTxt", async () => {
     const chk = el("chkExportSelectedOnly");
     if (chk) _exportSelectionState.selectedMode = chk.checked ? "selected" : "all";
     if (lastSnapshot) _cleanupSelectionWithSnapshot(lastSnapshot);
@@ -3476,7 +3501,7 @@ function bind() {
     await _runExportByType("txt");
   });
 
-  el("btnExportJson").addEventListener("click", async () => {
+  _bindClickSafe("btnExportJson", async () => {
     const chk = el("chkExportSelectedOnly");
     if (chk) _exportSelectionState.selectedMode = chk.checked ? "selected" : "all";
     if (lastSnapshot) _cleanupSelectionWithSnapshot(lastSnapshot);
@@ -3496,25 +3521,25 @@ function bind() {
     await _runExportByType(_exportUi.type);
   });
 
-  el("btnCopyLogs").addEventListener("click", async () => {
+  _bindClickSafe("btnCopyLogs", async () => {
     showToast("Logs copied.", { type: "success", ttl: 1600 });
     await ipcRenderer.invoke("logs:copy");
   });
 
-  el("btnClearLogs").addEventListener("click", async () => {
+  _bindClickSafe("btnClearLogs", async () => {
     await ipcRenderer.invoke("logs:clear");
   });
 
   // Patch tools
-  el("btnPickRunner").addEventListener("click", async () => {
+  _bindClickSafe("btnPickRunner", async () => {
     await ipcRenderer.invoke("patch:pickRunner");
   });
 
-  el("btnReloadManifest").addEventListener("click", async () => {
+  _bindClickSafe("btnReloadManifest", async () => {
     await ipcRenderer.invoke("patch:reloadManifest");
   });
 
-  el("btnPickRw").addEventListener("click", async () => {
+  _bindClickSafe("btnPickRw", async () => {
     const res = await ipcRenderer.invoke("patch:pickRw");
     // auto-generate pipeline from current selection
     const list = res?.valid || [];
@@ -3524,7 +3549,7 @@ function bind() {
     }
   });
 
-  el("btnClearRw").addEventListener("click", async () => {
+  _bindClickSafe("btnClearRw", async () => {
     // limpar seleção só no renderer (mantém simples)
     if (!lastSnapshot) return;
     lastSnapshot.patch.selectedRws = [];
@@ -3535,7 +3560,7 @@ function bind() {
     el("pipelinePathLine").textContent = `Pipeline: (not saved)`;
   });
 
-  el("btnSavePipeline").addEventListener("click", async () => {
+  _bindClickSafe("btnSavePipeline", async () => {
     try {
       const outPath = await ipcRenderer.invoke("patch:savePipeline", {
         pipelineText: el("pipelineText").value,
@@ -3550,7 +3575,7 @@ function bind() {
     }
   });
 
-  el("btnRunPlan").addEventListener("click", async () => {
+  _bindClickSafe("btnRunPlan", async () => {
     setPatchBusy(true, "plan");
 
     showToast("Running Plan…", { type: "info", ttl: 1600 });
@@ -3562,7 +3587,7 @@ function bind() {
 }
   });
 
-  el("btnRunApply").addEventListener("click", async () => {
+  _bindClickSafe("btnRunApply", async () => {
     await _runPreviewAndOpenDiffModal("run-apply");
   });
 
@@ -3585,7 +3610,7 @@ function bind() {
     _renderApplyDiffViewer();
   });
 
-  el("btnStopPatch").addEventListener("click", async () => {
+  _bindClickSafe("btnStopPatch", async () => {
     showToast("Stopping patch…", { type: "warn", ttl: 1800 });
     await ipcRenderer.invoke("patch:stop");
   });
@@ -3662,6 +3687,26 @@ ipcRenderer.on("watcher:changed", (_ev, payload) => {
   _scheduleAutoRefresh(payload?.reason || "watch");
 });
 
+
+if (__PM_UI_DEV__) {
+  window.addEventListener("error", (ev) => {
+    _uiDevLog(`window error: ${ev?.message || "unknown"}`, ev?.error || null);
+  });
+  window.addEventListener("unhandledrejection", (ev) => {
+    _uiDevLog("unhandled rejection", ev?.reason || null);
+  });
+}
+
+
+if (__PM_UI_TRACE_CLICKS__) {
+  window.addEventListener("pointerdown", (ev) => {
+    try {
+      const t = ev.target;
+      const id = t?.id ? `#${t.id}` : (t?.className ? `.${String(t.className).split(/\s+/)[0]}` : t?.tagName || "unknown");
+      _uiDevLog(`pointerdown target=${id}`);
+    } catch {}
+  }, true);
+}
 
 // bootstrap
 bind();

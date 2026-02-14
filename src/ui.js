@@ -1,11 +1,5 @@
 // @context: export-presets auto-apply refresh tree-state selection-profile
-/*
-PM-SV-PATCH META
-Version: pm-svpatch-ui@2026.02.11-r1
-Last-Edited: 2026-02-11
-Contains: UI shell, file tree, file view cards (view/edit/markdown/raw/fullscreen), toasts, patch controls UI.
-Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2) Refresh button alignment/feedback CSS (no logic changes).
-*/
+
 const { ipcRenderer } = require("electron");
 const fs = require("fs");
 const path = require("path");

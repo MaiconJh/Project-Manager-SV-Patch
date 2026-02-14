@@ -1344,6 +1344,9 @@ function syncExpandedIdsFromPaths(tree){
       if(n.children && n.children.length) n.children.forEach(walk);
     };
     walk(tree);
+    for(const p of Array.from(expandedPaths)){
+      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
+    }
   }catch{}
 }
 

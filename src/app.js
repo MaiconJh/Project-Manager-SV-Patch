@@ -1,4 +1,4 @@
-// @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback.
+// @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback electron-cache-path-hardening.
 const { app, BrowserWindow, dialog, ipcMain, clipboard } = require("electron");
 const path = require("path");
 const fs = require("fs");
@@ -12,6 +12,15 @@ let patchProc = null;
 
 const userDataDir = app.getPath("userData");
 const settingsPath = path.join(userDataDir, "app-settings.json");
+
+const safeCacheDir = path.join(userDataDir, "Cache");
+const safeGpuCacheDir = path.join(safeCacheDir, "GPU");
+try {
+  fs.mkdirSync(safeCacheDir, { recursive: true });
+  fs.mkdirSync(safeGpuCacheDir, { recursive: true });
+  app.commandLine.appendSwitch("disk-cache-dir", safeCacheDir);
+  app.commandLine.appendSwitch("gpu-cache-dir", safeGpuCacheDir);
+} catch {}
 
 const state = {
   projectPath: null,

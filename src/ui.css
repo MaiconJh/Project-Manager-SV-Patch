@@ -1,4 +1,4 @@
-/* @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback. */
+/* @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback files-header-sticky breadcrumb selected-row-kbnav. */
 /*
 PM-SV-PATCH META
 Version: pm-svpatch-ui@2026.02.11-r1
@@ -1561,6 +1561,29 @@ body.has-apply-diff .applyDiffModal{
    GitHub-like Files Tree visual refinement (visual-only)
    Scope: Files panel tree rows/actions/search alignment
    ========================================================= */
+
+.panel.files .panelHead{
+  position:sticky;
+  top:0;
+  z-index:6;
+  background:linear-gradient(180deg, rgba(13,17,23,.98), rgba(13,17,23,.94));
+  border-bottom:1px solid var(--border);
+}
+.filesBreadcrumb{
+  max-width:100%;
+  min-height:18px;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  font-family:var(--mono);
+}
+body.kbNav .panel.files .row:focus-visible{
+  outline:1px solid rgba(88,166,255,.55);
+  outline-offset:-1px;
+}
+body:not(.kbNav) .panel.files .row:focus{
+  outline:none;
+}
 .panel.files .panelHead{
   align-items:center;
   gap:10px;
@@ -1588,9 +1611,10 @@ body.has-apply-diff .applyDiffModal{
 }
 
 .panel.files .row.selected{
-  background:rgba(56,139,253,.16);
+  background:rgba(56,139,253,.14);
   outline:none;
   box-shadow:inset 2px 0 0 rgba(56,139,253,.78);
+  border-left:2px solid rgba(56,139,253,.72);
 }
 
 .panel.files .rowLeft{

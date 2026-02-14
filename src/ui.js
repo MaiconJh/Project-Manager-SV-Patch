@@ -9,6 +9,8 @@ Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2
 const { ipcRenderer } = require("electron");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+const { TextDecoder } = require("util");
 const { DEFAULT_IGNORE_EXTS } = require("./config");
 const el = (id) => document.getElementById(id);
 
@@ -27,6 +29,15 @@ const _exportSelectionState = {
   selectedMode: "all", // all | selected
 };
 const _exportSelectionFile = ".pm_sv_export_selection.json";
+const _exportSizeState = {
+  status: "idle", // idle | loading | ready | error
+  bytes: null,
+  lastStableBytes: null,
+  key: "",
+  token: 0,
+  debounceTimer: null,
+  cache: new Map(),
+};
 const _exportUi = {
   type: "txt", // txt | json
   contentLevel: "standard", // compact | standard | full (standard/full map to profile full)
@@ -1338,6 +1349,21 @@ function _cleanupExpandedPathsFromTree(tree){
   }catch{}
 }
 
+function _cleanupExpandedPathsFromTree(tree){
+  try{
+    const dirSet = new Set();
+    const walk = (n)=>{
+      if(!n) return;
+      if(n.isDir) dirSet.add(_normalizeAbsPath(n.absPath));
+      if(n.children && n.children.length) n.children.forEach(walk);
+    };
+    walk(tree);
+    for(const p of Array.from(expandedPaths)){
+      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
+    }
+  }catch{}
+}
+
 function flattenTree(node, depth, out, ignoredSet) {
   const hasChildren = node.isDir && node.children && node.children.length > 0;
   out.push({
@@ -1569,6 +1595,327 @@ function _countExportableAll(snapshot) {
   return count;
 }
 
+function _collectExportableAll(snapshot) {
+  const ignoredSet = new Set(snapshot?.ignored || []);
+  const out = new Set();
+  const walk = (n) => {
+    if (!n) return;
+    if (!n.isDir) {
+      const abs = String(n.absPath || "");
+      if (!ignoredSet.has(abs)) {
+        const ext = path.extname(abs) || "";
+        if (!(DEFAULT_IGNORE_EXTS && DEFAULT_IGNORE_EXTS.has && DEFAULT_IGNORE_EXTS.has(ext))) {
+          out.add(_normalizeAbsPath(abs));
+        }
+      }
+      return;
+    }
+    for (const ch of n.children || []) walk(ch);
+  };
+  walk(snapshot?.tree);
+  return out;
+}
+
+function _safeRelForExport(root, abs) {
+  try {
+    return String(path.relative(String(root || ""), String(abs || "")) || path.basename(String(abs || ""))).replaceAll("\\", "/");
+  } catch {
+    return String(abs || "").replaceAll("\\", "/");
+  }
+}
+
+function _hashStable(input) {
+  try {
+    return crypto.createHash("sha1").update(String(input || ""), "utf8").digest("hex");
+  } catch {
+    return String(input || "");
+  }
+}
+
+function _buildExportSizeKey(snapshot, profile, resolvedAbs) {
+  const root = String(snapshot?.projectPath || "");
+  const rels = (resolvedAbs || []).map((p) => _safeRelForExport(root, p)).sort((a, b) => a.localeCompare(b));
+  const stats = snapshot?.stats || {};
+  const sigObj = {
+    root,
+    format: profile?.format || "txt",
+    scope: profile?.scope || "all",
+    content_level: profile?.content_level || "full",
+    include_tree: Boolean(profile?.include_tree),
+    include_hashes: Boolean(profile?.include_hashes),
+    include_ignored_summary: Boolean(profile?.include_ignored_summary),
+    sort_mode: profile?.sort_mode || "dir_first_alpha",
+    selected_count: _exportSelectionState.selected.size,
+    stats: {
+      files: Number(stats.files || 0),
+      folders: Number(stats.folders || 0),
+      ignoredFiles: Number(stats.ignoredFiles || 0),
+      ignoredFolders: Number(stats.ignoredFolders || 0),
+    },
+    rels,
+  };
+  return _hashStable(JSON.stringify(sigObj));
+}
+
+function _treeAddExportFile(root, relPath, fileIndex) {
+  const parts = String(relPath || "").split("/").filter(Boolean);
+  let cur = root;
+  for (let i = 0; i < parts.length; i++) {
+    const name = parts[i];
+    const isLast = i === parts.length - 1;
+    const pathRel = parts.slice(0, i + 1).join("/");
+    if (isLast) {
+      cur.children.push({ type: "file", name, path: pathRel, file_index: fileIndex });
+      return;
+    }
+    let next = cur.children.find((c) => c.type === "dir" && c.name === name);
+    if (!next) {
+      next = { type: "dir", name, path: pathRel, children: [] };
+      cur.children.push(next);
+    }
+    cur = next;
+  }
+}
+
+function _sortExportTree(node, sortMode = "dir_first_alpha") {
+  if (!node || !Array.isArray(node.children)) return;
+  for (const ch of node.children) _sortExportTree(ch, sortMode);
+  node.children.sort((a, b) => {
+    if (sortMode === "dir_first_alpha") {
+      const ta = a.type === "dir" ? 0 : 1;
+      const tb = b.type === "dir" ? 0 : 1;
+      if (ta !== tb) return ta - tb;
+    }
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
+}
+
+async function _readFileForExport(absPath, includeContent, includeHashes) {
+  let st = null;
+  try { st = await fs.promises.stat(absPath); } catch {}
+  const sizeBytes = Number(st?.size || 0);
+  const mtimeMs = Number.isFinite(Number(st?.mtimeMs)) ? Number(st.mtimeMs) : null;
+  if (!includeContent && !includeHashes) {
+    return {
+      size_bytes: sizeBytes,
+      mtime_ms: mtimeMs,
+      encoding: null,
+      line_count: null,
+      sha256: null,
+      content: null,
+      content_error: null,
+    };
+  }
+
+  try {
+    const buf = await fs.promises.readFile(absPath);
+    for (let i = 0; i < Math.min(buf.length, 4096); i++) {
+      if (buf[i] === 0) {
+        return {
+          size_bytes: sizeBytes,
+          mtime_ms: mtimeMs,
+          encoding: includeContent ? null : null,
+          line_count: includeContent ? null : null,
+          sha256: includeHashes ? null : null,
+          content: includeContent ? null : null,
+          content_error: includeContent ? "binary_or_decode_failed" : null,
+        };
+      }
+    }
+    const dec = new TextDecoder("utf-8", { fatal: true });
+    const content = dec.decode(buf);
+    const lineCount = content.length ? content.split(/\r?\n/).length : 0;
+    const hash = includeHashes ? crypto.createHash("sha256").update(String(content), "utf8").digest("hex") : null;
+    return {
+      size_bytes: sizeBytes,
+      mtime_ms: mtimeMs,
+      encoding: includeContent ? "utf-8" : null,
+      line_count: includeContent ? lineCount : null,
+      sha256: hash,
+      content: includeContent ? content : null,
+      content_error: includeContent ? null : null,
+    };
+  } catch {
+    return {
+      size_bytes: sizeBytes,
+      mtime_ms: mtimeMs,
+      encoding: includeContent ? null : null,
+      line_count: includeContent ? null : null,
+      sha256: includeHashes ? null : null,
+      content: includeContent ? null : null,
+      content_error: includeContent ? "binary_or_decode_failed" : null,
+    };
+  }
+}
+
+async function _buildUnifiedReportForSize(snapshot, profile, resolvedAbs) {
+  const root = String(snapshot?.projectPath || "");
+  const ignored = Array.from(new Set(snapshot?.ignored || []))
+    .map((p) => _safeRelForExport(root, p))
+    .sort((a, b) => a.localeCompare(b));
+  const includeContent = profile.content_level !== "compact";
+  const includeHashes = Boolean(profile.include_hashes);
+  const absList = Array.from(new Set(resolvedAbs || [])).sort((a, b) => a.localeCompare(b));
+  const files = [];
+
+  for (let i = 0; i < absList.length; i++) {
+    const absPath = absList[i];
+    const meta = await _readFileForExport(absPath, includeContent, includeHashes);
+    const relPath = _safeRelForExport(root, absPath);
+    files.push({
+      path: relPath,
+      ext: path.extname(relPath) || "",
+      size_bytes: meta.size_bytes,
+      mtime_ms: meta.mtime_ms,
+      encoding: meta.encoding,
+      line_count: meta.line_count,
+      sha256: meta.sha256,
+      content: meta.content,
+      content_error: meta.content_error,
+    });
+    if (i % 40 === 0) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  files.sort((a, b) => String(a.path || "").localeCompare(String(b.path || "")));
+
+  const tree = { type: "dir", name: ".", path: "", children: [] };
+  const byPath = {};
+  for (let i = 0; i < files.length; i++) {
+    const rel = String(files[i].path || "").replaceAll("\\", "/");
+    _treeAddExportFile(tree, rel, i);
+    byPath[rel] = i;
+  }
+  _sortExportTree(tree, profile.sort_mode);
+
+  return {
+    schema_version: 1,
+    report_type: "project_report",
+    project: {
+      path: root,
+      generated_at: new Date().toISOString(),
+      generator: "Project Manager & SV Patch",
+      app_version: null,
+    },
+    export: {
+      mode: profile.scope === "selected" ? "selected" : "all",
+      profile,
+      selected_count: profile.scope === "selected" ? _exportSelectionState.selected.size : 0,
+      exported_files_count: files.length,
+      filters: {
+        ignored_exts: Array.from(DEFAULT_IGNORE_EXTS).sort((a, b) => String(a).localeCompare(String(b))),
+        ignored_paths: ignored,
+      },
+    },
+    tree,
+    files,
+    index: { by_path: byPath },
+    project_path: root,
+    generated_at: new Date().toISOString().replace("T", " ").slice(0, 19),
+    ignored,
+  };
+}
+
+function _renderTxtFromReport(report, projectPath) {
+  const lines = [];
+  lines.push("PROJECT REPORT");
+  lines.push("=".repeat(72));
+  lines.push(`Project: ${report.project?.path || projectPath || ""}`);
+  lines.push(`Generated: ${report.project?.generated_at || report.generated_at || ""}`);
+  lines.push(`Mode: ${report.export?.mode || "all"}`);
+  lines.push(`Exported files: ${Number(report.export?.exported_files_count || report.files?.length || 0)}`);
+  lines.push("");
+
+  if (report.export?.profile?.include_tree !== false) {
+    lines.push("EXPORTED TREE");
+    lines.push("-".repeat(72));
+    const walkTree = (node, depth) => {
+      if (!node) return;
+      if (depth > 0) {
+        const pad = "  ".repeat(Math.max(0, depth - 1));
+        lines.push(`${pad}${node.name}${node.type === "dir" ? "/" : ""}`);
+      }
+      if (Array.isArray(node.children)) {
+        for (const ch of node.children) walkTree(ch, depth + 1);
+      }
+    };
+    walkTree(report.tree, 0);
+    lines.push("");
+  }
+
+  if (report.export?.profile?.include_ignored_summary !== false && Array.isArray(report.ignored) && report.ignored.length) {
+    lines.push("Ignored:");
+    for (const ig of report.ignored) lines.push(`- ${ig}`);
+    lines.push("");
+  }
+
+  const files = Array.isArray(report.files) ? report.files : [];
+  for (const file of files) {
+    lines.push("-".repeat(72));
+    lines.push(`File: ${file.path}`);
+    lines.push(`Ext: ${file.ext} · Bytes: ${file.size_bytes ?? 0} · Lines: ${file.line_count ?? "-"} · Encoding: ${file.encoding || "-"}`);
+    lines.push("");
+    if (typeof file.content === "string") lines.push(file.content);
+    else lines.push(`[Could not read: ${file.content_error || "binary_or_decode_failed"}]`);
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function _formatArchiveSizeText(status, bytes, hasError) {
+  if (status === "loading") return "Loading…";
+  if (typeof bytes === "number" && Number.isFinite(bytes)) {
+    const kb = bytes / 1024;
+    const bytesFmt = new Intl.NumberFormat().format(bytes);
+    return `${bytesFmt} bytes (${kb.toFixed(1)} KB)${hasError ? " (error)" : ""}`;
+  }
+  return hasError ? "Loading… (error)" : "Loading…";
+}
+
+function _scheduleExportSizeRecalc(snapshot, profile, resolvedAbs) {
+  if (!snapshot?.projectPath) return;
+  const key = _buildExportSizeKey(snapshot, profile, resolvedAbs);
+  _exportSizeState.key = key;
+
+  if (_exportSizeState.cache.has(key)) {
+    const bytes = _exportSizeState.cache.get(key);
+    _exportSizeState.status = "ready";
+    _exportSizeState.bytes = bytes;
+    _exportSizeState.lastStableBytes = bytes;
+    return;
+  }
+
+  if (_exportSizeState.debounceTimer) {
+    clearTimeout(_exportSizeState.debounceTimer);
+    _exportSizeState.debounceTimer = null;
+  }
+
+  const token = ++_exportSizeState.token;
+  _exportSizeState.status = "loading";
+
+  _exportSizeState.debounceTimer = setTimeout(async () => {
+    try {
+      const report = await _buildUnifiedReportForSize(snapshot, profile, resolvedAbs);
+      if (token !== _exportSizeState.token) return;
+      const rendered = profile.format === "json"
+        ? JSON.stringify(report, null, 2)
+        : _renderTxtFromReport(report, snapshot.projectPath);
+      const bytes = Buffer.byteLength(rendered, "utf8");
+      if (token !== _exportSizeState.token) return;
+      _exportSizeState.cache.set(key, bytes);
+      _exportSizeState.status = "ready";
+      _exportSizeState.bytes = bytes;
+      _exportSizeState.lastStableBytes = bytes;
+      _updateExportLiveSummary(snapshot);
+    } catch {
+      if (token !== _exportSizeState.token) return;
+      _exportSizeState.status = "error";
+      _exportSizeState.bytes = _exportSizeState.lastStableBytes;
+      _updateExportLiveSummary(snapshot);
+    }
+  }, 180);
+}
+
 function _buildExportProfile() {
   return {
     profile_id: "default",
@@ -1657,15 +2004,23 @@ function _syncExportUiControls() {
 function _updateExportLiveSummary(snapshot) {
   const elSum = el("exportLiveSummary");
   if (!elSum) return;
+  const activeSnapshot = snapshot || lastSnapshot || {};
   const profile = _buildExportProfile();
   const mode = profile.scope === "selected" ? "Selected" : "All";
   const selected = _exportSelectionState.selected.size;
-  const resolved = profile.scope === "selected"
-    ? _collectExportableFromSelection(snapshot || lastSnapshot || {}).size
-    : _countExportableAll(snapshot || lastSnapshot || {});
-  const avgBytes = profile.content_level === "compact" ? 120 : 850;
-  const estKb = Math.max(1, Math.round(((resolved || (snapshot?.stats?.files || 0)) * avgBytes) / 1024));
-  elSum.textContent = `Mode: ${mode} · Selected: ${selected} · Resolved files: ${resolved} · Format: ${String(profile.format || "txt").toUpperCase()} · Tree: ${profile.include_tree ? "yes" : "no"} · Estimated size: ~${estKb} KB`;
+  const resolvedSet = profile.scope === "selected"
+    ? _collectExportableFromSelection(activeSnapshot)
+    : _collectExportableAll(activeSnapshot);
+  const resolvedAbs = Array.from(resolvedSet || []);
+  const resolved = resolvedAbs.length;
+
+  _scheduleExportSizeRecalc(activeSnapshot, profile, resolvedAbs);
+
+  const showBytes = _exportSizeState.status === "ready"
+    ? _exportSizeState.bytes
+    : (_exportSizeState.status === "error" ? _exportSizeState.lastStableBytes : null);
+  const sizeText = _formatArchiveSizeText(_exportSizeState.status, showBytes, _exportSizeState.status === "error");
+  elSum.textContent = `Mode: ${mode} · Selected: ${selected} · Resolved files: ${resolved} · Format: ${String(profile.format || "txt").toUpperCase()} · Tree: ${profile.include_tree ? "yes" : "no"} · Export archive size: ${sizeText}`;
 }
 
 async function _runExportByType(type) {
@@ -2849,6 +3204,7 @@ function bind() {
     if (!["compact", "standard", "full"].includes(lvl)) return;
     _exportUi.contentLevel = lvl;
     _syncExportUiControls();
+    _updateExportLiveSummary(lastSnapshot);
     _saveExportUiConfig();
   };
 
@@ -2859,6 +3215,7 @@ function bind() {
   const _bindOpt = (id, key) => {
     el(id)?.addEventListener("change", (ev) => {
       _exportUi.options[key] = Boolean(ev?.target?.checked);
+      _updateExportLiveSummary(lastSnapshot);
       _saveExportUiConfig();
     });
   };

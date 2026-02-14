@@ -6,6 +6,8 @@ Contains: UI shell, file tree, file view cards (view/edit/markdown/raw/fullscree
 Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2) Refresh button alignment/feedback CSS (no logic changes).
 */
 const { ipcRenderer } = require("electron");
+const fs = require("fs");
+const path = require("path");
 const el = (id) => document.getElementById(id);
 
 const expanded = new Set();
@@ -18,6 +20,11 @@ let filesSearchDebounceTimer = null;
 let currentPipelinePath = null;
 let lastSnapshot = null;
 let _applyDiffPreviewNonce = 0;
+const _exportSelectionState = {
+  selected: new Set(),
+  selectedMode: "all", // all | selected
+};
+const _exportSelectionFile = ".pm_sv_export_selection.json";
 
 const _applyDiffState = {
   open: false,
@@ -437,6 +444,19 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   let _findMatches = [];
   let _findIndex = -1;
   let _findDebounceTimer = null;
+  let _findBuildToken = 0;
+  let _findOverlayCacheKey = "";
+  let _findTypingTimer = null;
+  const _findState = {
+    isOpen: false,
+    matches: [],
+    activeIndex: -1,
+    total: 0,
+    buildToken: 0,
+    lastQuery: "",
+  };
+  let _lineEnding = /\r\n/.test(current) ? "CRLF" : "LF";
+  const _encoding = "UTF-8";
 
   const isMd = isMarkdownExt(ext);
 
@@ -480,11 +500,13 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     const editWrap = cardEl?.querySelector("[data-edit-wrap]");
     if (!findBar || !findInput || !editWrap || !editing) return;
     _findOpen = true;
+    _findState.isOpen = true;
     cardEl.dataset.findOpen = "1";
     findBar.hidden = false;
     editWrap.classList.add("find-open");
     findInput.focus();
     findInput.select();
+    _syncFindStatus(cardEl);
   }
 
   function closeFindBar(cardEl, focusEditor = false) {
@@ -495,9 +517,18 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     const overlay = cardEl?.querySelector("[data-find-overlay]");
     const overlayContent = cardEl?.querySelector("[data-find-overlay-content]");
     if (_findDebounceTimer) clearTimeout(_findDebounceTimer);
+    if (_findTypingTimer) clearTimeout(_findTypingTimer);
+    _findBuildToken += 1;
+    _findState.buildToken = _findBuildToken;
     _findOpen = false;
+    _findState.isOpen = false;
     _findMatches = [];
+    _findState.matches = [];
     _findIndex = -1;
+    _findState.activeIndex = -1;
+    _findState.total = 0;
+    _findState.lastQuery = "";
+    _findOverlayCacheKey = "";
     if (cardEl) cardEl.dataset.findOpen = "0";
     if (findBar) findBar.hidden = true;
     if (editWrap) editWrap.classList.remove("find-open");
@@ -507,7 +538,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       overlay.scrollLeft = 0;
     }
     if (overlayContent) overlayContent.innerHTML = "";
-    if (findStatus) findStatus.textContent = "";
+    if (findStatus) findStatus.textContent = "0 / 0";
     if (focusEditor && editor) editor.focus();
   }
 
@@ -525,16 +556,29 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   function _syncFindStatus(cardEl) {
     const status = cardEl?.querySelector("[data-find-status]");
     if (!status) return;
-    if (!_findOpen) {
-      status.textContent = "";
+    if (!_findState.isOpen) {
+      status.textContent = "0 / 0";
       return;
     }
-    const total = _findMatches.length;
+    const total = _findState.total;
     if (!total) {
-      status.textContent = "0 of 0";
+      status.textContent = "0 / 0";
       return;
     }
-    status.textContent = `${_findIndex + 1} of ${total}`;
+    status.textContent = `${_findState.activeIndex + 1} / ${total}`;
+  }
+
+  function _getFindOptions(cardEl) {
+    const matchCase = Boolean(cardEl?.querySelector("[data-find-case]")?.checked);
+    const wholeWord = Boolean(cardEl?.querySelector("[data-find-word]")?.checked);
+    return { matchCase, wholeWord };
+  }
+
+  function _buildFindRegex(needleRaw, opts) {
+    if (!needleRaw) return null;
+    const src = opts.wholeWord ? `\\b${_escapeRegExp(needleRaw)}\\b` : _escapeRegExp(needleRaw);
+    const flags = opts.matchCase ? "g" : "gi";
+    return new RegExp(src, flags);
   }
 
   function _scrollFindOverlayWithEditor(cardEl) {
@@ -545,7 +589,74 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     overlay.scrollLeft = editor.scrollLeft;
   }
 
-  function _rebuildFindMatches(cardEl) {
+  function _findBarHasFocus(cardEl) {
+    const findBar = cardEl?.querySelector("[data-findbar]");
+    const ae = document.activeElement;
+    return Boolean(findBar && ae && findBar.contains(ae));
+  }
+
+  function _scrollEditorToMatch(cardEl, match) {
+    const editor = cardEl?.querySelector("[data-editor]");
+    if (!editor || !match) return;
+    const txt = String(editor.value || "").slice(0, Math.max(0, match.start));
+    const lineIndex = txt.split("\n").length - 1;
+    const cs = window.getComputedStyle(editor);
+    const lineHeight = Number.parseFloat(cs.lineHeight) || 18;
+    const padTop = Number.parseFloat(cs.paddingTop) || 0;
+    const targetTop = padTop + (lineIndex * lineHeight);
+    const nextTop = clamp(
+      Math.round(targetTop - (editor.clientHeight / 2) + (lineHeight / 2)),
+      0,
+      Math.max(0, editor.scrollHeight - editor.clientHeight)
+    );
+    if (Math.abs((editor.scrollTop || 0) - nextTop) > 1) editor.scrollTop = nextTop;
+    _scrollFindOverlayWithEditor(cardEl);
+  }
+
+  function _computeFindMatches(text, needleRaw, opts, tokenHint) {
+    const out = [];
+    if (!needleRaw) return out;
+    const re = _buildFindRegex(needleRaw, opts);
+    if (!re) return out;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      if (tokenHint !== _findBuildToken) return null;
+      const start = m.index;
+      const len = Math.max(1, String(m[0] || "").length);
+      out.push({ start, end: start + len });
+      if (len === 0) re.lastIndex += 1;
+    }
+    return out;
+  }
+
+  function _renderFindOverlay(cardEl, text, needleRaw, opts) {
+    const overlay = cardEl?.querySelector("[data-find-overlay]");
+    const overlayContent = cardEl?.querySelector("[data-find-overlay-content]");
+    if (!overlay || !overlayContent) return;
+    if (!_findState.total || !_findState.isOpen || !needleRaw) {
+      overlay.hidden = true;
+      overlayContent.innerHTML = "";
+      _findOverlayCacheKey = "";
+      return;
+    }
+    const cacheKey = `${needleRaw}::${opts.matchCase ? 1 : 0}::${opts.wholeWord ? 1 : 0}::${_findState.activeIndex}::${text.length}`;
+    if (_findOverlayCacheKey === cacheKey) {
+      overlay.hidden = false;
+      return;
+    }
+    overlay.hidden = false;
+    const markRe = _buildFindRegex(needleRaw, opts);
+    if (!markRe) return;
+    let activeCount = -1;
+    overlayContent.innerHTML = _escapeHtmlLite(text).replace(markRe, (m0) => {
+      activeCount += 1;
+      const activeCls = activeCount === _findState.activeIndex ? " findMatchActive" : "";
+      return `<mark class="findMatch${activeCls}">${_escapeHtmlLite(m0)}</mark>`;
+    });
+    _findOverlayCacheKey = cacheKey;
+  }
+
+  function _rebuildFindMatches(cardEl, tokenHint = _findBuildToken) {
     const editor = cardEl?.querySelector("[data-editor]");
     const findInput = cardEl?.querySelector("[data-find-input]");
     const overlay = cardEl?.querySelector("[data-find-overlay]");
@@ -554,60 +665,124 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
 
     const text = String(editor.value || "");
     const needleRaw = String(findInput.value || "");
-    const needle = needleRaw.toLowerCase();
+    const opts = _getFindOptions(cardEl);
+    if (_findTypingTimer && _findBarHasFocus(cardEl)) return;
+    _findState.lastQuery = needleRaw;
 
     _findMatches = [];
     _findIndex = -1;
+    _findState.matches = [];
+    _findState.activeIndex = -1;
+    _findState.total = 0;
 
     if (!_findOpen || !needleRaw) {
-      overlay.hidden = true;
-      overlayContent.innerHTML = "";
+      _renderFindOverlay(cardEl, text, "", opts);
       _syncFindStatus(cardEl);
       return;
     }
 
-    let idx = 0;
-    const hay = text.toLowerCase();
-    while (idx <= hay.length) {
-      const pos = hay.indexOf(needle, idx);
-      if (pos === -1) break;
-      _findMatches.push({ start: pos, end: pos + needleRaw.length });
-      idx = pos + Math.max(1, needleRaw.length);
-    }
+    const computed = _computeFindMatches(text, needleRaw, opts, tokenHint);
+    if (computed === null) return;
+    _findMatches = computed;
+    _findState.matches = computed;
+    _findState.total = computed.length;
 
     if (!_findMatches.length) {
-      overlay.hidden = true;
-      overlayContent.innerHTML = "";
+      _renderFindOverlay(cardEl, text, needleRaw, opts);
       _syncFindStatus(cardEl);
       return;
     }
 
     _findIndex = 0;
-    overlay.hidden = false;
-
-    const re = new RegExp(_escapeRegExp(needleRaw), "gi");
-    let activeCount = -1;
-    overlayContent.innerHTML = _escapeHtmlLite(text).replace(re, (m) => {
-      activeCount += 1;
-      const activeCls = activeCount === _findIndex ? " findMatchActive" : "";
-      return `<mark class="findMatch${activeCls}">${_escapeHtmlLite(m)}</mark>`;
-    });
+    _findState.activeIndex = 0;
+    _renderFindOverlay(cardEl, text, needleRaw, opts);
 
     const m0 = _findMatches[0];
-    editor.focus();
-    editor.setSelectionRange(m0.start, m0.end);
-    _scrollFindOverlayWithEditor(cardEl);
+    if (!_findBarHasFocus(cardEl)) editor.setSelectionRange(m0.start, m0.end);
+    _scrollEditorToMatch(cardEl, m0);
     _syncFindStatus(cardEl);
   }
 
   function _scheduleFindRebuild(cardEl) {
     if (_findDebounceTimer) clearTimeout(_findDebounceTimer);
-    _findDebounceTimer = setTimeout(() => _rebuildFindMatches(cardEl), 140);
+    const token = ++_findBuildToken;
+    _findState.buildToken = token;
+    _findDebounceTimer = setTimeout(() => _rebuildFindMatches(cardEl, token), 140);
+  }
+
+  function _replaceCurrentFind(cardEl) {
+    if (!_findOpen || !_findMatches.length) return false;
+    const editor = cardEl?.querySelector("[data-editor]");
+    const replaceInput = cardEl?.querySelector("[data-replace-input]");
+    const hadFindFocus = _findBarHasFocus(cardEl);
+    if (!editor || !replaceInput) return false;
+    const m = _findMatches[Math.max(0, _findIndex)];
+    if (!m) return false;
+    const left = String(editor.value || "").slice(0, m.start);
+    const right = String(editor.value || "").slice(m.end);
+    const replacement = String(replaceInput.value || "");
+    editor.value = left + replacement + right;
+    current = String(editor.value || "");
+    const caret = left.length + replacement.length;
+    if (!hadFindFocus) editor.setSelectionRange(caret, caret);
+    scheduleLineNumbersRefresh(editor, cardEl?.querySelector("[data-lines]"));
+    _scheduleFindRebuild(cardEl);
+    _updateEditorStatus(cardEl);
+    if (hadFindFocus) {
+      const findInput = cardEl?.querySelector("[data-find-input]");
+      if (findInput) findInput.focus({ preventScroll: true });
+    }
+    return true;
+  }
+
+  function _replaceAllFind(cardEl) {
+    if (!_findOpen) return 0;
+    const editor = cardEl?.querySelector("[data-editor]");
+    const findInput = cardEl?.querySelector("[data-find-input]");
+    const replaceInput = cardEl?.querySelector("[data-replace-input]");
+    if (!editor || !findInput || !replaceInput) return 0;
+    const needleRaw = String(findInput.value || "");
+    if (!needleRaw) return 0;
+    const re = _buildFindRegex(needleRaw, _getFindOptions(cardEl));
+    if (!re) return 0;
+    let count = 0;
+    const replacement = String(replaceInput.value || "");
+    editor.value = String(editor.value || "").replace(re, () => {
+      count += 1;
+      return replacement;
+    });
+    current = String(editor.value || "");
+    scheduleLineNumbersRefresh(editor, cardEl?.querySelector("[data-lines]"));
+    _scheduleFindRebuild(cardEl);
+    _updateEditorStatus(cardEl);
+    return count;
+  }
+
+  function _updateEditorStatus(cardEl) {
+    const editor = cardEl?.querySelector("[data-editor]");
+    if (!editor) return;
+    const text = String(editor.value || "");
+    const pos = Number.isFinite(editor.selectionStart) ? editor.selectionStart : 0;
+    const upto = text.slice(0, pos);
+    const line = upto.split(/\n/).length;
+    const col = pos - upto.lastIndexOf("\n");
+    _lineEnding = /\r\n/.test(text) ? "CRLF" : "LF";
+    const modeEl = cardEl?.querySelector("[data-status-mode]");
+    const posEl = cardEl?.querySelector("[data-status-pos]");
+    const sizeEl = cardEl?.querySelector("[data-status-size]");
+    const eolEl = cardEl?.querySelector("[data-status-eol]");
+    const encEl = cardEl?.querySelector("[data-status-enc]");
+    if (modeEl) modeEl.textContent = editing ? "Edit" : "View";
+    if (posEl) posEl.textContent = `Ln ${line}, Col ${Math.max(1, col)}`;
+    if (sizeEl) sizeEl.textContent = fmtBytes(text.length);
+    if (eolEl) eolEl.textContent = _lineEnding;
+    if (encEl) encEl.textContent = _encoding;
   }
 
   function _selectFindMatchByIndex(cardEl, nextIndex) {
     const editor = cardEl?.querySelector("[data-editor]");
     const overlayContent = cardEl?.querySelector("[data-find-overlay-content]");
+    const hadFindFocus = _findBarHasFocus(cardEl);
     if (!editor || !_findMatches.length) {
       _syncFindStatus(cardEl);
       return false;
@@ -615,22 +790,31 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
 
     const total = _findMatches.length;
     _findIndex = ((nextIndex % total) + total) % total;
+    _findState.activeIndex = _findIndex;
     const m = _findMatches[_findIndex];
-    editor.focus();
-    editor.setSelectionRange(m.start, m.end);
+    if (!hadFindFocus) editor.setSelectionRange(m.start, m.end);
 
     if (overlayContent) {
       const marks = overlayContent.querySelectorAll("mark.findMatch");
-      marks.forEach((el, i) => el.classList.toggle("findMatchActive", i == _findIndex));
+      if (marks.length === _findMatches.length) {
+        marks.forEach((el, i) => el.classList.toggle("findMatchActive", i == _findIndex));
+      } else {
+        const findInput = cardEl?.querySelector("[data-find-input]");
+        _renderFindOverlay(cardEl, String(editor.value || ""), String(findInput?.value || ""), _getFindOptions(cardEl));
+      }
     }
 
-    _scrollFindOverlayWithEditor(cardEl);
+    _scrollEditorToMatch(cardEl, m);
+    if (hadFindFocus) {
+      const findInput = cardEl?.querySelector("[data-find-input]");
+      if (findInput) findInput.focus({ preventScroll: true });
+    }
     _syncFindStatus(cardEl);
     return true;
   }
 
   function _findInEditor(cardEl, direction) {
-    if (!_findOpen) return false;
+    if (!_findState.isOpen) return false;
     if (!_findMatches.length) {
       _scheduleFindRebuild(cardEl);
       return false;
@@ -691,12 +875,14 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       const gutter = card.querySelector("[data-gutter]");
       updateLineNumbers(editor, gutterPre);
       syncEditorGutterScroll(editor, gutter);
+      _updateEditorStatus(card);
     }
     if (viewer) viewer.style.display = editing ? "none" : "";
     if (btnEdit) btnEdit.classList.toggle("active", editing);
     if (btnSave) btnSave.style.display = editing ? "" : "none";
     if (btnCancel) btnCancel.style.display = editing ? "" : "none";
     if (btnRaw) btnRaw.style.display = !editing ? "" : "none";
+    _updateEditorStatus(card);
   }
 
   card.innerHTML = `
@@ -759,8 +945,13 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       <div class="fvEditWrap" data-edit-wrap="1" style="display:none">
         <div class="fvFindBar" data-findbar="1" hidden>
           <input type="text" class="fvFindInput" data-find-input="1" placeholder="Find" aria-label="Find in editor" />
+          <input type="text" class="fvFindInput fvReplaceInput" data-replace-input="1" placeholder="Replace" aria-label="Replace in editor" />
+          <label class="fvFindOpt"><input type="checkbox" data-find-case="1" /> Aa</label>
+          <label class="fvFindOpt"><input type="checkbox" data-find-word="1" /> W</label>
           <button class="fvFindBtn" type="button" data-find-prev="1">Prev</button>
           <button class="fvFindBtn" type="button" data-find-next="1">Next</button>
+          <button class="fvFindBtn" type="button" data-replace-next="1">Replace</button>
+          <button class="fvFindBtn" type="button" data-replace-all="1">Replace All</button>
           <button class="fvFindBtn" type="button" data-find-close="1" aria-label="Close find">×</button>
           <span class="fvFindStatus" data-find-status="1"></span>
         </div>
@@ -770,6 +961,13 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
             <pre class="fvFindOverlay" data-find-overlay="1" hidden><code data-find-overlay-content="1"></code></pre>
             <textarea class="fvEditor" data-editor="1" spellcheck="false" style="display:none"></textarea>
           </div>
+        </div>
+        <div class="fvStatusBar" data-statusbar="1">
+          <span data-status-mode="1">View</span>
+          <span data-status-pos="1">Ln 1, Col 1</span>
+          <span data-status-size="1">${escapeHtml(fmtBytes(sizeBytes))}</span>
+          <span data-status-eol="1">${escapeHtml(_lineEnding)}</span>
+          <span data-status-enc="1">${escapeHtml(_encoding)}</span>
         </div>
       </div>
     </div>
@@ -931,6 +1129,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     const editorEl = card.querySelector("[data-editor]");
     const gutterPre = card.querySelector("[data-lines]");
     scheduleLineNumbersRefresh(editorEl, gutterPre);
+    _updateEditorStatus(card);
     if (_findOpen) _scheduleFindRebuild(card);
   });
 
@@ -941,6 +1140,8 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   });
 
   card.querySelector("[data-editor]")?.addEventListener("keydown", (e) => {
+    const findBar = card.querySelector("[data-findbar]");
+    if (findBar && findBar.contains(document.activeElement)) return;
     if ((e.ctrlKey || e.metaKey) && String(e.key || "").toLowerCase() === "f") {
       e.preventDefault();
       if (!editing) return;
@@ -949,13 +1150,15 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       return;
     }
     if (String(e.key || "") === "Escape") {
-      const findBar = card.querySelector("[data-findbar]");
       if (_findOpen && findBar && !findBar.hidden) {
         e.preventDefault();
         closeFindBar(card, true);
       }
     }
   });
+
+  card.querySelector("[data-editor]")?.addEventListener("click", () => _updateEditorStatus(card));
+  card.querySelector("[data-editor]")?.addEventListener("keyup", () => _updateEditorStatus(card));
 
   card.querySelector("[data-find-close]")?.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -973,6 +1176,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   });
 
   card.querySelector("[data-find-input]")?.addEventListener("keydown", (e) => {
+    e.stopPropagation();
     if (String(e.key || "") === "Escape") {
       e.preventDefault();
       closeFindBar(card, true);
@@ -984,7 +1188,54 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     }
   });
 
-  card.querySelector("[data-find-input]")?.addEventListener("input", () => {
+  card.querySelector("[data-find-input]")?.addEventListener("input", (e) => {
+    e.stopPropagation();
+    if (!_findOpen) return;
+    if (_findTypingTimer) clearTimeout(_findTypingTimer);
+    _findTypingTimer = setTimeout(() => {
+      _findTypingTimer = null;
+      _scheduleFindRebuild(card);
+    }, 120);
+  });
+
+  card.querySelector("[data-find-input]")?.addEventListener("blur", () => {
+    if (_findTypingTimer) {
+      clearTimeout(_findTypingTimer);
+      _findTypingTimer = null;
+      if (_findOpen) _scheduleFindRebuild(card);
+    }
+  });
+
+  card.querySelector("[data-find-input]")?.addEventListener("compositionend", () => {
+    if (!_findOpen) return;
+    _scheduleFindRebuild(card);
+  });
+
+  card.querySelector("[data-replace-input]")?.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+  });
+
+  card.querySelector("[data-replace-input]")?.addEventListener("input", (e) => {
+    e.stopPropagation();
+  });
+
+  card.querySelector("[data-replace-next]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    _replaceCurrentFind(card);
+  });
+
+  card.querySelector("[data-replace-all]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const total = _replaceAllFind(card);
+    if (total > 0) addLog(`[FILE_EDIT] Replaced ${total} match(es) in ${relPath || absPath}`);
+  });
+
+  card.querySelector("[data-find-case]")?.addEventListener("change", () => {
+    if (!_findOpen) return;
+    _scheduleFindRebuild(card);
+  });
+
+  card.querySelector("[data-find-word]")?.addEventListener("change", () => {
     if (!_findOpen) return;
     _scheduleFindRebuild(card);
   });
@@ -1161,9 +1412,142 @@ function _virtualRange(total, rowH, viewportH, scrollTop, overscan) {
   return { start, end };
 }
 
+function _normalizeAbsPath(p) {
+  return String(p || "").replaceAll("\\", "/");
+}
+
+function _isSelectedPath(absPath) {
+  const p = _normalizeAbsPath(absPath);
+  return _exportSelectionState.selected.has(p);
+}
+
+function _toggleSelectedPath(absPath) {
+  const p = _normalizeAbsPath(absPath);
+  if (!p) return;
+  if (_exportSelectionState.selected.has(p)) _exportSelectionState.selected.delete(p);
+  else _exportSelectionState.selected.add(p);
+}
+
+function _collectDescendantsFromSnapshot(snapshot, folderPathNormalized) {
+  const out = [];
+  if (!snapshot?.tree || !folderPathNormalized) return out;
+
+  let target = null;
+  const walkFind = (node) => {
+    if (!node || target) return;
+    if (_normalizeAbsPath(node.absPath) === folderPathNormalized) {
+      target = node;
+      return;
+    }
+    for (const ch of node.children || []) walkFind(ch);
+  };
+  walkFind(snapshot.tree);
+  if (!target) return out;
+
+  const walkDesc = (node) => {
+    if (!node) return;
+    for (const ch of node.children || []) {
+      out.push(_normalizeAbsPath(ch.absPath));
+      walkDesc(ch);
+    }
+  };
+  walkDesc(target);
+  return out;
+}
+
+function _applyFolderSelection(selectedSet, folderPathNormalized, isSelecting, descendantsList) {
+  if (!selectedSet || !folderPathNormalized) return;
+  const all = [folderPathNormalized, ...(descendantsList || [])];
+  if (isSelecting) {
+    for (const p of all) selectedSet.add(_normalizeAbsPath(p));
+  } else {
+    for (const p of all) selectedSet.delete(_normalizeAbsPath(p));
+  }
+}
+
+function _cleanupSelectionWithSnapshot(snapshot) {
+  try {
+    if (!snapshot?.projectPath) {
+      _exportSelectionState.selected.clear();
+      return;
+    }
+    const indexSet = new Set();
+    const walk = (node) => {
+      if (!node) return;
+      indexSet.add(_normalizeAbsPath(node.absPath));
+      if (Array.isArray(node.children)) node.children.forEach(walk);
+    };
+    walk(snapshot.tree);
+    const next = new Set();
+    for (const p of _exportSelectionState.selected) {
+      const pn = _normalizeAbsPath(p);
+      if (indexSet.has(pn)) next.add(pn);
+    }
+    _exportSelectionState.selected = next;
+  } catch {}
+}
+
+function _collectExportableFromSelection(snapshot) {
+  const ignoredSet = new Set(snapshot?.ignored || []);
+  const fileRows = [];
+  const walk = (n) => {
+    if (!n) return;
+    if (!n.isDir) {
+      fileRows.push({ absPath: String(n.absPath || "") });
+      return;
+    }
+    for (const ch of n.children || []) walk(ch);
+  };
+  walk(snapshot?.tree);
+  const out = new Set();
+  const selected = _exportSelectionState.selected;
+  const normSel = Array.from(selected).map((p) => _normalizeAbsPath(p));
+
+  for (const r of fileRows) {
+    if (ignoredSet.has(r.absPath)) continue;
+    const rp = _normalizeAbsPath(r.absPath);
+    let picked = selected.has(rp);
+    if (!picked) {
+      for (const s of normSel) {
+        if (!s) continue;
+        if (rp === s || rp.startsWith(s.endsWith("/") ? s : s + "/")) {
+          picked = true;
+          break;
+        }
+      }
+    }
+    if (picked) out.add(rp);
+  }
+  return out;
+}
+
+function _updateExportSelectionMeta(snapshot) {
+  const countEl = el("exportSelectedCount");
+  if (!countEl) return;
+  const selectedCount = _exportSelectionState.selected.size;
+  const resolved = _collectExportableFromSelection(snapshot || lastSnapshot || {}).size;
+  countEl.textContent = `Selected: ${selectedCount} · Resolved files: ${resolved}`;
+}
+
+function _writeExportSelectionConfig(snapshot) {
+  try {
+    const root = String(snapshot?.projectPath || "");
+    if (!root) return;
+    const cfgPath = path.join(root, _exportSelectionFile);
+    const payload = {
+      selectedOnly: _exportSelectionState.selectedMode === "selected",
+      selectedMode: _exportSelectionState.selectedMode,
+      selected: Array.from(_exportSelectionState.selected).map((p) => _normalizeAbsPath(p)),
+      updatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(cfgPath, JSON.stringify(payload, null, 2), "utf-8");
+  } catch {}
+}
+
 function _buildFileRow(r, snapshot) {
   const row = document.createElement("div");
-  row.className = "row" + (r.id === selectedId ? " selected" : "") + (r.ignored ? " ignored" : "");
+  const picked = _isSelectedPath(r.absPath);
+  row.className = "row" + (r.id === selectedId ? " selected" : "") + (r.ignored ? " ignored" : "") + (picked ? " row-picked" : "");
 
   const indentPx = r.depth * 16;
 
@@ -1183,6 +1567,7 @@ function _buildFileRow(r, snapshot) {
 
   row.innerHTML = `
     <div class="rowLeft" style="padding-left:${indentPx}px">
+      <input type="checkbox" class="rowPick" data-select="1" aria-label="Select for export" ${picked ? "checked" : ""} ${r.ignored ? "disabled" : ""} />
       ${caret}
       <span class="fileIco">${icon}</span>
       <div class="name" title="${r.name}">${r.name}</div>
@@ -1200,10 +1585,25 @@ function _buildFileRow(r, snapshot) {
     const target = e.target;
     if (
       target.closest &&
-      (target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
+      (target.closest("[data-select]") || target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
     )
       return;
     selectedId = r.id;
+    render(snapshot);
+  });
+
+  row.querySelector("[data-select]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (r.ignored) return;
+    const p = _normalizeAbsPath(r.absPath);
+    if (r.isDir) {
+      const descendants = _collectDescendantsFromSnapshot(snapshot, p);
+      const isSelecting = !_exportSelectionState.selected.has(p);
+      _applyFolderSelection(_exportSelectionState.selected, p, isSelecting, descendants);
+    } else {
+      _toggleSelectedPath(p);
+    }
+    _updateExportSelectionMeta(snapshot);
     render(snapshot);
   });
 
@@ -1240,7 +1640,7 @@ function _buildFileRow(r, snapshot) {
     const target = e.target;
     if (
       target.closest &&
-      (target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
+      (target.closest("[data-select]") || target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
     )
       return;
 
@@ -1362,11 +1762,14 @@ function renderManifest(manifest) {
 
 function render(snapshot) {
   lastSnapshot = snapshot;
+  _cleanupSelectionWithSnapshot(snapshot);
 
   el("projectPath").textContent = snapshot.projectPath || "No folder opened";
   el("itemsCount").textContent = `${snapshot.stats.items} items`;
   _updateItemsCount(snapshot, null);
   el("statusLine").textContent = snapshot.status || "Ready.";
+  const chkSelectedOnly = el("chkExportSelectedOnly");
+  if (chkSelectedOnly) chkSelectedOnly.checked = _exportSelectionState.selectedMode === "selected";
 
   el("stats").textContent =
     `Folders: ${snapshot.stats.folders} · Files: ${snapshot.stats.files} · Ignored: ${
@@ -1462,6 +1865,7 @@ try{
   _fileRowsCache = rows;
   _fileRowsSnapshot = snapshot;
   _renderVirtualFileRows(list, rows, snapshot);
+  _updateExportSelectionMeta(snapshot);
 }
 
 function _previewActionLabel(action) {
@@ -2233,12 +2637,44 @@ function bind() {
     await ipcRenderer.invoke("tree:clearIgnored");
   });
 
+  el("chkExportSelectedOnly")?.addEventListener("change", (e) => {
+    _exportSelectionState.selectedMode = e?.target?.checked ? "selected" : "all";
+    _updateExportSelectionMeta(lastSnapshot);
+    if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
+  });
+
+  el("btnSelectAllVisible")?.addEventListener("click", () => {
+    const snapshot = lastSnapshot;
+    if (!snapshot) return;
+    const ignoredSet = new Set(snapshot.ignored || []);
+    for (const r of _fileRowsCache || []) {
+      if (ignoredSet.has(r.absPath)) continue;
+      _exportSelectionState.selected.add(_normalizeAbsPath(r.absPath));
+    }
+    _updateExportSelectionMeta(snapshot);
+    render(snapshot);
+  });
+
+  el("btnClearSelection")?.addEventListener("click", () => {
+    _exportSelectionState.selected.clear();
+    _updateExportSelectionMeta(lastSnapshot);
+    if (lastSnapshot) render(lastSnapshot);
+  });
+
   el("btnExportTxt").addEventListener("click", async () => {
+    const chk = el("chkExportSelectedOnly");
+    if (chk) _exportSelectionState.selectedMode = chk.checked ? "selected" : "all";
+    if (lastSnapshot) _cleanupSelectionWithSnapshot(lastSnapshot);
+    if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
     showToast("Exporting TXT…", { type: "info", ttl: 1800 });
     await ipcRenderer.invoke("export:txt");
   });
 
   el("btnExportJson").addEventListener("click", async () => {
+    const chk = el("chkExportSelectedOnly");
+    if (chk) _exportSelectionState.selectedMode = chk.checked ? "selected" : "all";
+    if (lastSnapshot) _cleanupSelectionWithSnapshot(lastSnapshot);
+    if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
     showToast("Exporting JSON…", { type: "info", ttl: 1800 });
     await ipcRenderer.invoke("export:json");
   });

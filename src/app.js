@@ -1,3 +1,4 @@
+// @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback.
 const { app, BrowserWindow, dialog, ipcMain, clipboard } = require("electron");
 const path = require("path");
 const fs = require("fs");
@@ -1153,6 +1154,53 @@ ipcMain.handle("export:txt", async () => {
     log("SUCCESS", `Exported TXT: ${out}`);
   } catch (e) {
     log("ERROR", `Export TXT failed: ${e.message || e}`);
+  }
+});
+
+
+// ─────────────────────────────────────────────
+// Preset file I/O (renderer-driven preset object; no export IPC changes)
+ipcMain.handle("preset:saveAs", async (_, payload = {}) => {
+  if (!ensureProjectOpen()) return { ok: false, error: "No project open" };
+  try {
+    const suggested = String(payload?.suggestedName || "preset.pmspreset.json").trim() || "preset.pmspreset.json";
+    const defaultPath = path.join(state.projectPath || app.getPath("documents"), suggested);
+    const res = await dialog.showSaveDialog(win, {
+      title: "Save preset",
+      defaultPath,
+      filters: [
+        { name: "Preset JSON", extensions: ["pmspreset.json", "json"] },
+      ],
+    });
+    if (res.canceled || !res.filePath) return { canceled: true };
+    const outPath = String(res.filePath);
+    await fs.promises.writeFile(outPath, String(payload?.presetJsonString || "{}"), "utf8");
+    log("SUCCESS", `Preset saved: ${outPath}`);
+    return { ok: true, path: outPath };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+});
+
+ipcMain.handle("preset:open", async (_, payload = {}) => {
+  if (!ensureProjectOpen()) return { ok: false, error: "No project open" };
+  try {
+    const defaultPath = String(payload?.projectRoot || state.projectPath || app.getPath("documents"));
+    const res = await dialog.showOpenDialog(win, {
+      title: "Import preset",
+      defaultPath,
+      properties: ["openFile"],
+      filters: [
+        { name: "Preset JSON", extensions: ["pmspreset.json", "json"] },
+      ],
+    });
+    if (res.canceled || !res.filePaths?.[0]) return { canceled: true };
+    const filePath = String(res.filePaths[0]);
+    const contents = await fs.promises.readFile(filePath, "utf8");
+    log("INFO", `Preset imported: ${filePath}`);
+    return { ok: true, path: filePath, contents };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
   }
 });
 

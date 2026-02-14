@@ -138,6 +138,9 @@ const _exportPresetState = {
   feedbackTimer: null,
 };
 
+const _stateUpdateWaiters = [];
+
+
 const _applyDiffState = {
   open: false,
   busy: false,
@@ -1421,9 +1424,6 @@ function syncExpandedIdsFromPaths(tree){
       if(n.children && n.children.length) n.children.forEach(walk);
     };
     walk(tree);
-    for(const p of Array.from(expandedPaths)){
-      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
-    }
   }catch{}
 }
 
@@ -2173,6 +2173,61 @@ function _normalizePathList(list, projectRoot = "") {
   return Array.from(new Set(out));
 }
 
+async function _awaitStateUpdateOnce(timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      resolve({ ok: false, timeout: true });
+    }, Math.max(100, Number(timeoutMs || 0)));
+    _stateUpdateWaiters.push((snapshot) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ ok: true, snapshot });
+    });
+  });
+}
+
+async function _applyHiddenPathsFromPreset(snapshot, presetHiddenPaths) {
+  const idxRaw = _collectSnapshotPathIndex(snapshot || {});
+  const idx = {
+    all: idxRaw?.all instanceof Set ? idxRaw.all : new Set(),
+    actualByNorm: idxRaw?.actualByNorm instanceof Map ? idxRaw.actualByNorm : new Map(),
+    ignoredSet: new Set(Array.isArray(snapshot?.ignored) ? snapshot.ignored.map((p) => _normalizeAbsPath(p)) : []),
+  };
+  const requestedHidden = _normalizePathList(presetHiddenPaths || [], snapshot?.projectPath || "");
+  const hiddenToRestore = [];
+  for (const hp of requestedHidden) {
+    if (!hp || !idx.all.has(hp)) continue;
+    const actual = idx.actualByNorm.get(hp) || hp;
+    hiddenToRestore.push(actual);
+  }
+
+  await ipcRenderer.invoke("tree:clearIgnored");
+  for (const hp of hiddenToRestore) {
+    await ipcRenderer.invoke("tree:toggleIgnored", hp);
+  }
+
+  const stateAck = await _awaitStateUpdateOnce(1500);
+  if (stateAck.ok && stateAck.snapshot) {
+    lastSnapshot = stateAck.snapshot;
+  } else if (snapshot && typeof snapshot === "object") {
+    snapshot.ignored = hiddenToRestore.slice();
+  }
+
+  return {
+    requestedHidden,
+    hiddenToRestore,
+    applied: hiddenToRestore.length,
+    requested: requestedHidden.length,
+    missing: Math.max(0, requestedHidden.length - hiddenToRestore.length),
+    stateConfirmed: Boolean(stateAck.ok),
+    snapshot: stateAck.snapshot || snapshot,
+  };
+}
+
 function _validatePresetV1(presetObj, snapshot) {
   if (!presetObj || typeof presetObj !== "object") return { ok: false, error: "Preset JSON must be an object" };
   if (presetObj.schema_version !== "preset.v1") return { ok: false, error: "Invalid schema_version (expected preset.v1)" };
@@ -2254,26 +2309,15 @@ async function _applyPresetV1(snapshot, presetObj) {
     const requestedHidden = _normalizePathList(presetObj?.export?.hidden_paths || [], snapshot?.projectPath || "");
     _exportSelectionState.selectedMode = presetObj?.export?.scope?.mode === "selected" ? "selected" : "all";
 
-    const presetProfile = { ...(presetObj?.export?.profile || {}) };
-    if (!Object.prototype.hasOwnProperty.call(presetProfile, "schema_version") && Object.prototype.hasOwnProperty.call(presetProfile, "export_schema_version")) {
-      presetProfile.schema_version = presetProfile.export_schema_version;
-    }
-    _applyExportProfileToUi(presetProfile);
-
-    const hiddenToRestore = [];
-    for (const hp of requestedHidden) {
-      if (!hp || !idx.all.has(hp)) continue;
-      const actual = idx.actualByNorm?.get(hp) || hp;
-      hiddenToRestore.push(actual);
-    }
+    _setPresetFeedbackTimed("Applying hidden paths…", "loading");
+    let hiddenResult = { requestedHidden, hiddenToRestore: [], applied: 0, requested: requestedHidden.length, missing: requestedHidden.length, stateConfirmed: true, snapshot };
     try {
-      await ipcRenderer.invoke("tree:clearIgnored");
-      for (const hp of hiddenToRestore) {
-        await ipcRenderer.invoke("tree:toggleIgnored", hp);
-      }
-      if (snapshot && typeof snapshot === "object") snapshot.ignored = hiddenToRestore.slice();
+      hiddenResult = await _applyHiddenPathsFromPreset(snapshot, requestedHidden);
+      snapshot = hiddenResult.snapshot || snapshot;
+      if (__PM_UI_DEV__) console.log(`[PRESET] hidden apply ${hiddenResult.applied}/${hiddenResult.requested} confirmed=${hiddenResult.stateConfirmed}`);
     } catch (hiddenErr) {
       if (__PM_UI_DEV__) console.error("[PRESET] hidden restore failed", hiddenErr);
+      hiddenResult.stateConfirmed = false;
     }
 
     if (token !== _exportPresetState.applyToken) return;
@@ -2293,6 +2337,12 @@ async function _applyPresetV1(snapshot, presetObj) {
       }
     }
 
+    const presetProfile = { ...(presetObj?.export?.profile || {}) };
+    if (!Object.prototype.hasOwnProperty.call(presetProfile, "schema_version") && Object.prototype.hasOwnProperty.call(presetProfile, "export_schema_version")) {
+      presetProfile.schema_version = presetProfile.export_schema_version;
+    }
+    _applyExportProfileToUi(presetProfile);
+
     const mainChk = el("chkExportSelectedOnly");
     const tabChk = el("chkExportSelectedOnlyTab");
     const isSel = _exportSelectionState.selectedMode === "selected";
@@ -2304,10 +2354,12 @@ async function _applyPresetV1(snapshot, presetObj) {
     if (snapshot?.projectPath) _writeExportSelectionConfig(snapshot);
 
     const h = _classifyPresetApplyHealth(snapshot, requestedSelection, requestedHidden);
+    if (!hiddenResult.stateConfirmed && h.status === "OK") h.status = "PARTIAL";
     _exportPresetState.lastHealth = String(h.status || "OK").toLowerCase();
     const mode = h.status === "OK" ? "ok" : (h.status === "PARTIAL" ? "partial" : "broken");
-    _setPresetFeedbackTimed(`Applied: ${h.status} (hidden restored: ${h.hiddenResolved}/${h.hiddenRequested})`, mode, 5200);
-    try { addLog(`[PRESET] applied: ${h.status} missing=${h.missing} hidden=${h.hiddenResolved}/${h.hiddenRequested}`); } catch {}
+    const confirmSuffix = hiddenResult.stateConfirmed ? "" : " (ignored state not confirmed)";
+    _setPresetFeedbackTimed(`Applied preset: ${h.status} (hidden restored ${h.hiddenResolved}/${h.hiddenRequested})${confirmSuffix}`, mode, 5200);
+    try { addLog(`[PRESET] applied: ${h.status} missing=${h.missing} hidden=${h.hiddenResolved}/${h.hiddenRequested} confirmed=${hiddenResult.stateConfirmed}`); } catch {}
   } catch (e) {
     _setPresetFeedbackTimed(`Error: ${e?.message || e}`, "error", 5200);
     try { addLog(`[PRESET] apply error: ${e?.message || e}`); } catch {}
@@ -3839,6 +3891,11 @@ function bind() {
 // ─────────────────────────────────────────────
 // IPC events
 ipcRenderer.on("state:update", (_, snapshot) => {
+  lastSnapshot = snapshot;
+  const waiters = _stateUpdateWaiters.splice(0, _stateUpdateWaiters.length);
+  for (const done of waiters) {
+    try { done(snapshot); } catch {}
+  }
   render(snapshot);
   _maybeAutoApplyPreset(snapshot);
 });

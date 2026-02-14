@@ -1,3 +1,11 @@
+/* @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback. */
+/*
+PM-SV-PATCH META
+Version: pm-svpatch-ui@2026.02.11-r1
+Last-Edited: 2026-02-11
+Contains: UI shell, file tree, file view cards (view/edit/markdown/raw/fullscreen), toasts, patch controls UI.
+Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2) Refresh button alignment/feedback CSS (no logic changes).
+*/
 :root{
   --bg:#0d1117;
   --surface:#161b22;
@@ -2112,3 +2120,6 @@ body.has-apply-diff .applyDiffModal{
 .presetFeedback.partial{ color:var(--warn); }
 .presetFeedback.broken{ color:var(--bad); }
 .presetFeedback.loading{ color:var(--muted); }
+
+.presetFeedback.error{ color:var(--danger); }
+.presetFeedback.cancel{ color:var(--muted); }

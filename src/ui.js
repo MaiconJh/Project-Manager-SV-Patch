@@ -1,5 +1,11 @@
-// @context: export-presets auto-apply refresh tree-state selection-profile
-
+// @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback.
+/*
+PM-SV-PATCH META
+Version: pm-svpatch-ui@2026.02.11-r1
+Last-Edited: 2026-02-11
+Contains: UI shell, file tree, file view cards (view/edit/markdown/raw/fullscreen), toasts, patch controls UI.
+Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2) Refresh button alignment/feedback CSS (no logic changes).
+*/
 const { ipcRenderer } = require("electron");
 const fs = require("fs");
 const path = require("path");
@@ -42,16 +48,10 @@ const _exportUi = {
     sortDet: true,
   },
 };
-const _exportPresetStorageKey = "pm_sv_export_presets_v1";
 const _exportPresetState = {
-  presets: [],
-  selectedId: "",
-  autoApply: true,
   applying: false,
   applyToken: 0,
-  refreshCycleToken: 0,
-  pendingAutoApply: false,
-  lastAppliedCycleToken: 0,
+  lastPresetPath: "",
   lastHealth: "none", // none | ok | partial | broken
   feedbackTimer: null,
 };
@@ -1971,157 +1971,80 @@ function _saveExportUiConfig() {
   } catch {}
 }
 
-function _loadExportPresetsConfig() {
-  try {
-    const raw = localStorage.getItem(_exportPresetStorageKey);
-    if (!raw) return;
-    const obj = JSON.parse(raw || "{}");
-    const presets = Array.isArray(obj?.presets) ? obj.presets : [];
-    _exportPresetState.presets = presets.filter((p) => p && typeof p === "object");
-    _exportPresetState.selectedId = String(obj?.selectedId || "");
-    _exportPresetState.autoApply = obj?.autoApply !== false;
-  } catch {}
-}
-
-function _saveExportPresetsConfig() {
-  try {
-    const payload = {
-      selectedId: _exportPresetState.selectedId,
-      autoApply: Boolean(_exportPresetState.autoApply),
-      presets: _exportPresetState.presets,
-      updatedAt: new Date().toISOString(),
-    };
-    localStorage.setItem(_exportPresetStorageKey, JSON.stringify(payload));
-  } catch {}
-}
-
-function _collectSnapshotPathIndex(snapshot) {
-  const all = new Set();
-  const dirs = new Set();
-  const files = new Set();
-  const walk = (n) => {
-    if (!n) return;
-    const abs = _normalizeAbsPath(n.absPath);
-    if (abs) {
-      all.add(abs);
-      if (n.isDir) dirs.add(abs);
-      else files.add(abs);
-    }
-    for (const ch of n.children || []) walk(ch);
-  };
-  walk(snapshot?.tree);
-  return { all, dirs, files };
-}
-
-function _markPresetRefreshCycle() {
-  _exportPresetState.refreshCycleToken += 1;
-  _exportPresetState.pendingAutoApply = true;
-}
-
 function _setPresetFeedback(message, mode = "none") {
   const fb = el("presetFeedback");
   if (!fb) return;
-  fb.textContent = message || "Preset: None";
-  fb.classList.remove("ok", "partial", "broken", "loading");
+  fb.textContent = message || "Preset: idle";
+  fb.classList.remove("ok", "partial", "broken", "loading", "error", "cancel");
   if (mode && mode !== "none") fb.classList.add(mode);
 }
 function _defaultPresetName() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
-  return `Preset ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `preset-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.pmspreset.json`;
 }
 
-function _setPresetFeedbackTimed(message, mode = "none", ttl = 2600) {
+function _setPresetFeedbackTimed(message, mode = "none", ttl = 4800) {
   _setPresetFeedback(message, mode);
   try { if (_exportPresetState.feedbackTimer) clearTimeout(_exportPresetState.feedbackTimer); } catch {}
   if (mode === "loading") return;
   _exportPresetState.feedbackTimer = setTimeout(() => {
-    const fb = el("presetFeedback");
-    if (!fb) return;
-    if (_exportPresetState.selectedId) {
-      const p = (_exportPresetState.presets || []).find((x) => String(x?.id || "") === String(_exportPresetState.selectedId));
-      if (p) {
-        _setPresetFeedback(`Preset ${p.name}: ready`, "none");
-        return;
-      }
+    if (_exportPresetState.lastPresetPath) {
+      _setPresetFeedback(`Preset file: ${path.basename(_exportPresetState.lastPresetPath)}`, "none");
+    } else {
+      _setPresetFeedback("Preset: idle", "none");
     }
-    _setPresetFeedback("Preset: None", "none");
-  }, Math.max(800, Number(ttl || 0)));
+  }, Math.max(1200, Number(ttl || 0)));
 }
 
-function _refreshPresetControlsUi() {
-  const sel = el("exportPresetSelect");
-  if (sel) {
-    const current = _exportPresetState.selectedId || "";
-    while (sel.firstChild) sel.removeChild(sel.firstChild);
-    const none = document.createElement("option");
-    none.value = "";
-    none.textContent = "None";
-    sel.appendChild(none);
-    for (const p of _exportPresetState.presets) {
-      const id = String(p?.id || "");
-      const name = String(p?.name || "Preset");
-      if (!id) continue;
-      const opt = document.createElement("option");
-      opt.value = id;
-      opt.textContent = name;
-      sel.appendChild(opt);
-    }
-    sel.value = current;
-    if (sel.value !== current) {
-      _exportPresetState.selectedId = "";
-      sel.value = "";
-    }
+function _setPresetActionButtonsBusy(busy) {
+  const bSave = el("btnPresetSaveFile");
+  const bImport = el("btnPresetImportFile");
+  if (bSave) bSave.disabled = !!busy;
+  if (bImport) bImport.disabled = !!busy;
+}
+
+function _buildPresetV1(snapshot) {
+  return {
+    schema_version: "preset.v1",
+    created_at: new Date().toISOString(),
+    project_root: String(snapshot?.projectPath || ""),
+    export: {
+      profile: _buildExportProfile(),
+      scope: {
+        mode: _exportSelectionState.selectedMode === "selected" ? "selected" : "all",
+        selected: Array.from(_exportSelectionState.selected || []).map((p) => _normalizeAbsPath(p)),
+      },
+    },
+    tree: {
+      expanded_paths: Array.from(expandedPaths || []).map((p) => _normalizeAbsPath(p)),
+    },
+  };
+}
+
+function _validatePresetV1(presetObj, snapshot) {
+  if (!presetObj || typeof presetObj !== "object") return { ok: false, error: "Preset JSON must be an object" };
+  if (presetObj.schema_version !== "preset.v1") return { ok: false, error: "Invalid schema_version (expected preset.v1)" };
+  if (!snapshot?.projectPath) return { ok: false, error: "No active project" };
+  if (String(presetObj.project_root || "") !== String(snapshot.projectPath || "")) {
+    return { ok: false, error: "Preset belongs to another project", mismatch: true };
   }
-  const auto = el("chkPresetAutoApply");
-  if (auto) auto.checked = Boolean(_exportPresetState.autoApply);
-
-  const applyBtn = el("btnPresetApply");
-  const saveBtn = el("btnPresetSave");
-  const disable = _exportPresetState.applying;
-  if (applyBtn) applyBtn.disabled = disable;
-  if (saveBtn) saveBtn.disabled = disable;
-  if (!_exportPresetState.selectedId) _setPresetFeedback("Preset: None", "none");
+  if (!presetObj.export || typeof presetObj.export !== "object") return { ok: false, error: "Missing export section" };
+  return { ok: true };
 }
 
-function _buildCurrentPresetDraft(snapshot) {
-  const normalizedSelected = Array.from(_exportSelectionState.selected || []).map((p) => _normalizeAbsPath(p));
-  const expanded = Array.from(expandedPaths || []).map((p) => _normalizeAbsPath(p));
-  const list = el("fileList");
-  return {
-    schema_version: "export_preset_v1",
-    project_path: String(snapshot?.projectPath || ""),
-    export_profile: _buildExportProfile(),
-    selection: {
-      mode: _exportSelectionState.selectedMode === "selected" ? "selected" : "all",
-      paths: normalizedSelected,
-    },
-    tree_view: {
-      expanded_paths: expanded,
-      scroll_hint: Number.isFinite(Number(list?.scrollTop)) ? Number(list.scrollTop) : 0,
-    },
-    rehydration: {
-      apply_on_refresh: Boolean(_exportPresetState.autoApply),
-      cleanup_missing_paths: true,
-    },
-  };
-}
-
-function _evaluatePresetHealth(preset, snapshot) {
+function _classifyPresetApplyHealth(snapshot, requestedSelection) {
   const idx = _collectSnapshotPathIndex(snapshot || {});
-  const selectionPaths = Array.isArray(preset?.selection?.paths) ? preset.selection.paths.map((p) => _normalizeAbsPath(p)) : [];
-  const expanded = Array.isArray(preset?.tree_view?.expanded_paths) ? preset.tree_view.expanded_paths.map((p) => _normalizeAbsPath(p)) : [];
-  const missingSelection = selectionPaths.filter((p) => p && !idx.all.has(p));
-  const missingExpanded = expanded.filter((p) => p && !idx.dirs.has(p));
-  const mismatch = Boolean(preset?.project_path && snapshot?.projectPath && preset.project_path !== snapshot.projectPath);
-  const status = mismatch ? "broken" : ((missingSelection.length || missingExpanded.length) ? "partial" : "ok");
-  return {
-    status,
-    missingSelection,
-    missingExpanded,
-    selectedCount: selectionPaths.length,
-    expandedCount: expanded.length,
-  };
+  const req = Array.isArray(requestedSelection) ? requestedSelection.map((p) => _normalizeAbsPath(p)).filter(Boolean) : [];
+  let resolved = 0;
+  let missing = 0;
+  for (const p of req) {
+    if (idx.all.has(p)) resolved += 1;
+    else missing += 1;
+  }
+  if (resolved === 0 && req.length > 0) return { status: "BROKEN", missing };
+  if (missing > 0) return { status: "PARTIAL", missing };
+  return { status: "OK", missing: 0 };
 }
 
 function _applyExportProfileToUi(profile) {
@@ -2136,50 +2059,45 @@ function _applyExportProfileToUi(profile) {
   _saveExportUiConfig();
 }
 
-async function _applyPreset(preset, snapshot, reason = "manual") {
-  if (!preset || !snapshot) return;
+async function _applyPresetV1(snapshot, presetObj) {
   const token = ++_exportPresetState.applyToken;
   _exportPresetState.applying = true;
-  _refreshPresetControlsUi();
-  _setPresetFeedbackTimed(`Applying preset: ${preset.name || "Preset"}… Loading…`, "loading");
+  _setPresetActionButtonsBusy(true);
+  _setPresetFeedbackTimed("Applying preset… Loading…", "loading");
 
   try {
-    const health = _evaluatePresetHealth(preset, snapshot);
-    const cleanupMissing = preset?.rehydration?.cleanup_missing_paths !== false;
-
-    if (health.status === "broken" && reason === "auto-refresh") {
-      _exportPresetState.lastHealth = "broken";
-      _setPresetFeedbackTimed(`Broken: project mismatch for preset ${preset.name || "Preset"}`, "broken", 4200);
-      try { addLog(`[PRESET] broken(project-mismatch): ${preset.name || "Preset"}`); } catch {}
+    const valid = _validatePresetV1(presetObj, snapshot);
+    if (!valid.ok) {
+      _setPresetFeedbackTimed(`Error: ${valid.error}`, valid.mismatch ? "broken" : "error", 5200);
+      try { addLog(`[PRESET] import rejected: ${valid.error}`); } catch {}
       return;
     }
 
-    const idx = _collectSnapshotPathIndex(snapshot);
-    const expandedSrc = Array.isArray(preset?.tree_view?.expanded_paths) ? preset.tree_view.expanded_paths : [];
-    const expandedNorm = expandedSrc.map((p) => _normalizeAbsPath(p)).filter(Boolean);
+    const idx = _collectSnapshotPathIndex(snapshot || {});
+    const expandedSrc = Array.isArray(presetObj?.tree?.expanded_paths) ? presetObj.tree.expanded_paths : [];
     expandedPaths.clear();
-    for (const p of expandedNorm) {
-      if (!cleanupMissing || idx.dirs.has(p)) expandedPaths.add(p);
+    for (const ep of expandedSrc) {
+      const p = _normalizeAbsPath(ep);
+      if (p && idx.dirs.has(p)) expandedPaths.add(p);
     }
 
-    _exportSelectionState.selectedMode = preset?.selection?.mode === "selected" ? "selected" : "all";
+    const requestedSelection = Array.isArray(presetObj?.export?.scope?.selected) ? presetObj.export.scope.selected : [];
+    _exportSelectionState.selectedMode = presetObj?.export?.scope?.mode === "selected" ? "selected" : "all";
     _exportSelectionState.selected.clear();
-    const selectionSrc = Array.isArray(preset?.selection?.paths) ? preset.selection.paths : [];
-    for (const p0 of selectionSrc) {
+    for (const p0 of requestedSelection) {
       const p = _normalizeAbsPath(p0);
-      if (!p) continue;
-      if (cleanupMissing && !idx.all.has(p)) continue;
+      if (!p || !idx.all.has(p)) continue;
       _exportSelectionState.selected.add(p);
       if (idx.dirs.has(p)) {
         const descendants = _collectDescendantsFromSnapshot(snapshot, p);
         for (const d of descendants) {
           const dn = _normalizeAbsPath(d);
-          if (!cleanupMissing || idx.all.has(dn)) _exportSelectionState.selected.add(dn);
+          if (idx.all.has(dn)) _exportSelectionState.selected.add(dn);
         }
       }
     }
 
-    _applyExportProfileToUi(preset.export_profile || {});
+    _applyExportProfileToUi(presetObj?.export?.profile || {});
 
     if (token !== _exportPresetState.applyToken) return;
 
@@ -2190,91 +2108,98 @@ async function _applyPreset(preset, snapshot, reason = "manual") {
     if (tabChk) tabChk.checked = isSel;
 
     render(snapshot);
-
-    const scrollHint = Number(preset?.tree_view?.scroll_hint);
-    if (Number.isFinite(scrollHint)) {
-      const list = el("fileList");
-      if (list) list.scrollTop = Math.max(0, scrollHint);
-    }
-
     _updateExportSelectionMeta(snapshot);
     if (snapshot?.projectPath) _writeExportSelectionConfig(snapshot);
-    _saveExportPresetsConfig();
 
-    const appliedSelected = _exportSelectionState.selected.size;
-    const resolved = _collectExportableFromSelection(snapshot).size;
-    _exportPresetState.lastHealth = health.status;
-    const mode = health.status === "ok" ? "ok" : (health.status === "broken" ? "broken" : "partial");
-    const msg = health.status === "partial"
-      ? `Applied: ${preset.name || "Preset"} · Partial (${health.missingSelection.length + health.missingExpanded.length} missing) · expanded ${expandedPaths.size} · selected ${health.selectedCount} → ${resolved}`
-      : `Applied: ${preset.name || "Preset"} · expanded ${expandedPaths.size} · selected ${health.selectedCount} → ${resolved}`;
-    _setPresetFeedbackTimed(msg, mode, 3200);
-    try { addLog(`[PRESET] applied: ${preset.name || "Preset"} (${mode})`); } catch {}
+    const h = _classifyPresetApplyHealth(snapshot, requestedSelection);
+    _exportPresetState.lastHealth = String(h.status || "OK").toLowerCase();
+    const mode = h.status === "OK" ? "ok" : (h.status === "PARTIAL" ? "partial" : "broken");
+    _setPresetFeedbackTimed(`Applied preset: ${h.status} (missing: ${h.missing})`, mode, 5200);
+    try { addLog(`[PRESET] applied: ${h.status} missing=${h.missing}`); } catch {}
   } catch (e) {
-    _setPresetFeedbackTimed(`Apply failed: ${e?.message || e}`, "broken", 4200);
-    try { addLog(`[PRESET] apply failed: ${e?.message || e}`); } catch {}
+    _setPresetFeedbackTimed(`Error: ${e?.message || e}`, "error", 5200);
+    try { addLog(`[PRESET] apply error: ${e?.message || e}`); } catch {}
   } finally {
     if (token === _exportPresetState.applyToken) {
       _exportPresetState.applying = false;
-      _refreshPresetControlsUi();
+      _setPresetActionButtonsBusy(false);
     }
   }
 }
 
-function _savePresetByName(name, snapshot) {
+async function _savePresetToFile(snapshot) {
   if (!snapshot?.projectPath) {
-    _setPresetFeedbackTimed("Save failed: open a project first", "broken", 3600);
-    try { addLog("[PRESET] save failed: no project loaded"); } catch {}
+    _setPresetFeedbackTimed("Error: open a project first", "error", 4200);
     return;
   }
-
-  const n = String(name || "").trim() || _defaultPresetName();
-  const draft = _buildCurrentPresetDraft(snapshot);
-  const existing = (_exportPresetState.presets || []).find((p) => String(p?.name || "") === n);
-  const id = String(existing?.id || `${n.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${Date.now()}`);
-  const preset = {
-    id,
-    name: n,
-    updated_at: new Date().toISOString(),
-    ...draft,
-  };
-  _exportPresetState.presets = (_exportPresetState.presets || []).filter((p) => p && String(p.id || "") !== id && String(p.name || "") !== n);
-  _exportPresetState.presets.unshift(preset);
-  _exportPresetState.selectedId = id;
-  _saveExportPresetsConfig();
-  _refreshPresetControlsUi();
-  _setPresetFeedbackTimed(`Saved preset: ${n}`, "ok", 2600);
-  try { addLog(`[PRESET] saved: ${n}`); } catch {}
+  _setPresetActionButtonsBusy(true);
+  _setPresetFeedbackTimed("Saving preset…", "loading");
+  try {
+    const preset = _buildPresetV1(snapshot);
+    const payload = {
+      suggestedName: _defaultPresetName(),
+      projectRoot: String(snapshot.projectPath || ""),
+      presetJsonString: JSON.stringify(preset, null, 2),
+    };
+    const res = await ipcRenderer.invoke("preset:saveAs", payload);
+    if (res?.canceled) {
+      _setPresetFeedbackTimed("Canceled", "cancel", 2800);
+      try { addLog("[PRESET] save canceled"); } catch {}
+      return;
+    }
+    if (!res?.ok) {
+      _setPresetFeedbackTimed(`Error: ${res?.error || "save failed"}`, "error", 5200);
+      try { addLog(`[PRESET] save error: ${res?.error || "save failed"}`); } catch {}
+      return;
+    }
+    _exportPresetState.lastPresetPath = String(res.path || "");
+    _setPresetFeedbackTimed(`Saved: ${path.basename(String(res.path || "preset"))}`, "ok", 4200);
+    try { addLog(`[PRESET] saved: ${res.path}`); } catch {}
+  } catch (e) {
+    _setPresetFeedbackTimed(`Error: ${e?.message || e}`, "error", 5200);
+  } finally {
+    _setPresetActionButtonsBusy(false);
+  }
 }
 
-async function _applySelectedPresetNow(snapshot, reason = "manual") {
-  const id = _exportPresetState.selectedId;
-  if (!id) {
-    _setPresetFeedbackTimed("Apply failed: choose a preset", "broken", 2800);
-    return;
-  }
+async function _importPresetFromFile(snapshot) {
   if (!snapshot?.projectPath) {
-    _setPresetFeedbackTimed("Apply failed: no active snapshot", "broken", 3200);
+    _setPresetFeedbackTimed("Error: open a project first", "error", 4200);
     return;
   }
-  const preset = (_exportPresetState.presets || []).find((p) => String(p?.id || "") === String(id || ""));
-  if (!preset) {
-    _setPresetFeedbackTimed("Apply failed: selected preset not found", "broken", 3200);
-    return;
+  _setPresetActionButtonsBusy(true);
+  _setPresetFeedbackTimed("Importing preset…", "loading");
+  try {
+    const res = await ipcRenderer.invoke("preset:open", { projectRoot: String(snapshot.projectPath || "") });
+    if (res?.canceled) {
+      _setPresetFeedbackTimed("Canceled", "cancel", 2800);
+      try { addLog("[PRESET] import canceled"); } catch {}
+      return;
+    }
+    if (!res?.ok) {
+      _setPresetFeedbackTimed(`Error: ${res?.error || "import failed"}`, "error", 5200);
+      try { addLog(`[PRESET] import error: ${res?.error || "import failed"}`); } catch {}
+      return;
+    }
+
+    let parsed = null;
+    try { parsed = JSON.parse(String(res.contents || "")); }
+    catch (e) {
+      _setPresetFeedbackTimed(`Error: invalid JSON (${e?.message || e})`, "error", 5200);
+      try { addLog(`[PRESET] invalid JSON: ${e?.message || e}`); } catch {}
+      return;
+    }
+
+    _exportPresetState.lastPresetPath = String(res.path || "");
+    _setPresetFeedbackTimed(`Imported: ${path.basename(String(res.path || "preset"))}`, "ok", 2200);
+    await _applyPresetV1(snapshot, parsed);
+  } catch (e) {
+    _setPresetFeedbackTimed(`Error: ${e?.message || e}`, "error", 5200);
+  } finally {
+    _setPresetActionButtonsBusy(false);
   }
-  await _applyPreset(preset, snapshot, reason);
 }
 
-async function _maybeAutoApplyPreset(snapshot) {
-  if (!_exportPresetState.autoApply) return;
-  if (!_exportPresetState.pendingAutoApply) return;
-  if (_exportPresetState.lastAppliedCycleToken === _exportPresetState.refreshCycleToken) return;
-  if (!_exportPresetState.selectedId) return;
-
-  _exportPresetState.pendingAutoApply = false;
-  _exportPresetState.lastAppliedCycleToken = _exportPresetState.refreshCycleToken;
-  await _applySelectedPresetNow(snapshot, "auto-refresh");
-}
 
 function _syncExportUiControls() {
   const typeTxt = el("btnExportTypeTxt");
@@ -2667,14 +2592,11 @@ try{
   _renderVirtualFileRows(list, rows, snapshot);
   _updateExportSelectionMeta(snapshot);
 
-  _refreshPresetControlsUi();
-  if (!_exportPresetState.applying && _exportPresetState.selectedId) {
-    const preset = (_exportPresetState.presets || []).find((p) => String(p?.id || "") === String(_exportPresetState.selectedId));
-    if (preset) {
-      const h = _evaluatePresetHealth(preset, snapshot);
-      if (h.status === "broken") _setPresetFeedback(`Broken: preset ${preset.name || "Preset"} is for another project`, "broken");
-      else if (h.status === "partial") _setPresetFeedback(`Preset ${preset.name || "Preset"}: Partial (${h.missingSelection.length + h.missingExpanded.length} missing paths)`, "partial");
-      else _setPresetFeedback(`Preset ${preset.name || "Preset"}: OK`, "ok");
+  if (!_exportPresetState.applying) {
+    if (_exportPresetState.lastPresetPath) {
+      _setPresetFeedback(`Preset file: ${path.basename(_exportPresetState.lastPresetPath)}`, "none");
+    } else {
+      _setPresetFeedback("Preset: idle", "none");
     }
   }
 }
@@ -3384,7 +3306,6 @@ async function _confirmApplyFromDiffModal() {
 
 function bind() {
   _loadExportUiConfig();
-  _loadExportPresetsConfig();
   try{
     const prof = _buildExportProfile();
     _exportSelectionState.selectedMode = prof.scope === "selected" ? "selected" : "all";
@@ -3538,32 +3459,14 @@ function bind() {
   _syncExportUiControls();
   _updateExportLiveSummary(lastSnapshot);
 
-  el("exportPresetSelect")?.addEventListener("change", (ev) => {
-    _exportPresetState.selectedId = String(ev?.target?.value || "");
-    _saveExportPresetsConfig();
-    _refreshPresetControlsUi();
-    if (_exportPresetState.selectedId) {
-      const p = (_exportPresetState.presets || []).find((x) => String(x?.id || "") === _exportPresetState.selectedId);
-      if (p) _setPresetFeedbackTimed(`Selected preset: ${p.name}`, "none", 1600);
-    }
+  el("btnPresetSaveFile")?.addEventListener("click", async () => {
+    await _savePresetToFile(lastSnapshot);
   });
 
-  el("chkPresetAutoApply")?.addEventListener("change", (ev) => {
-    _exportPresetState.autoApply = Boolean(ev?.target?.checked);
-    _saveExportPresetsConfig();
-    _refreshPresetControlsUi();
+  el("btnPresetImportFile")?.addEventListener("click", async () => {
+    await _importPresetFromFile(lastSnapshot);
   });
 
-  el("btnPresetSave")?.addEventListener("click", () => {
-    const fallback = ((_exportPresetState.presets || [])[0]?.name || "").trim();
-    const typed = window.prompt("Preset name", fallback || _defaultPresetName());
-    const name = String(typed == null ? "" : typed).trim() || _defaultPresetName();
-    _savePresetByName(name, lastSnapshot);
-  });
-
-  el("btnPresetApply")?.addEventListener("click", async () => {
-    await _applySelectedPresetNow(lastSnapshot, "manual");
-  });
 
   el("btnExportTxt").addEventListener("click", async () => {
     const chk = el("chkExportSelectedOnly");

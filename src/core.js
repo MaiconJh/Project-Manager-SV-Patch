@@ -152,14 +152,23 @@ function _isPathWithinFolder(filePath, folderPath) {
 function _loadExportSelectionConfig(state) {
   try {
     const cfgPath = path.join(state.projectPath, ".pm_sv_export_selection.json");
-    if (!fs.existsSync(cfgPath)) return { selectedOnly: false, selectedSet: new Set() };
+    if (!fs.existsSync(cfgPath)) return { selectedOnly: false, selectedSet: new Set(), profile: _normalizeExportProfile(null) };
     const raw = fs.readFileSync(cfgPath, "utf-8");
     const obj = JSON.parse(raw || "{}");
     const selectedOnly = Boolean(obj?.selectedOnly || String(obj?.selectedMode || "").toLowerCase() === "selected");
     const selected = Array.isArray(obj?.selected) ? obj.selected : [];
-    return { selectedOnly, selectedSet: new Set(selected.map(String)) };
+    const profile = _normalizeExportProfile(obj?.profile || {
+      format: obj?.format,
+      scope: selectedOnly ? "selected" : "all",
+      content_level: obj?.contentLevel,
+      include_tree: obj?.options?.treeHeader,
+      include_hashes: obj?.options?.hashes,
+      include_ignored_summary: obj?.options?.ignoredSummary,
+      sort_mode: obj?.options?.sortDet === false ? "alpha" : "dir_first_alpha",
+    });
+    return { selectedOnly, selectedSet: new Set(selected.map(String)), profile };
   } catch {
-    return { selectedOnly: false, selectedSet: new Set() };
+    return { selectedOnly: false, selectedSet: new Set(), profile: _normalizeExportProfile(null) };
   }
 }
 
@@ -231,21 +240,50 @@ function _treeAddFile(root, relPath, fileIndex) {
   }
 }
 
-function _sortTree(node) {
+function _sortTree(node, sortMode = "dir_first_alpha") {
   if (!node || !Array.isArray(node.children)) return;
-  for (const ch of node.children) _sortTree(ch);
+  for (const ch of node.children) _sortTree(ch, sortMode);
   node.children.sort((a, b) => {
-    const ta = a.type === "dir" ? 0 : 1;
-    const tb = b.type === "dir" ? 0 : 1;
-    if (ta !== tb) return ta - tb;
+    if (sortMode === "dir_first_alpha") {
+      const ta = a.type === "dir" ? 0 : 1;
+      const tb = b.type === "dir" ? 0 : 1;
+      if (ta !== tb) return ta - tb;
+    }
     return String(a.name || "").localeCompare(String(b.name || ""));
   });
+}
+
+const DEFAULT_EXPORT_PROFILE = {
+  profile_id: "default",
+  format: "txt",
+  scope: "all",
+  content_level: "standard",
+  include_tree: true,
+  include_hashes: false,
+  include_ignored_summary: true,
+  sort_mode: "dir_first_alpha",
+  schema_version: 1,
+};
+
+function _normalizeExportProfile(profile) {
+  const p = { ...(DEFAULT_EXPORT_PROFILE || {}), ...(profile || {}) };
+  p.profile_id = String(p.profile_id || "default");
+  p.format = p.format === "json" ? "json" : "txt";
+  p.scope = p.scope === "selected" ? "selected" : "all";
+  p.content_level = ["compact", "standard", "full"].includes(p.content_level) ? p.content_level : "standard";
+  p.include_tree = Boolean(p.include_tree);
+  p.include_hashes = Boolean(p.include_hashes);
+  p.include_ignored_summary = Boolean(p.include_ignored_summary);
+  p.sort_mode = p.sort_mode === "alpha" ? "alpha" : "dir_first_alpha";
+  p.schema_version = 1;
+  return p;
 }
 
 function buildUnifiedProjectReport(projectRootAbs, legacyModel, selectionState = {}, options = {}) {
   const files = Array.isArray(legacyModel?.files) ? legacyModel.files : [];
   const ignored = Array.isArray(legacyModel?.ignored) ? legacyModel.ignored.slice() : [];
-  const mode = selectionState.selectedOnly ? "selected" : "all";
+  const profile = _normalizeExportProfile(selectionState.profile || null);
+  const mode = profile.scope === "selected" ? "selected" : "all";
   const selectedCount = Number(selectionState.selected_count || 0);
 
   const tree = { type: "dir", name: ".", path: "", children: [] };
@@ -255,7 +293,7 @@ function buildUnifiedProjectReport(projectRootAbs, legacyModel, selectionState =
     _treeAddFile(tree, rel, i);
     byPath[rel] = i;
   }
-  _sortTree(tree);
+  _sortTree(tree, profile.sort_mode);
 
   return {
     // canonical
@@ -269,6 +307,7 @@ function buildUnifiedProjectReport(projectRootAbs, legacyModel, selectionState =
     },
     export: {
       mode,
+      profile,
       selected_count: selectedCount,
       exported_files_count: files.length,
       filters: {
@@ -293,7 +332,9 @@ function buildExportModel(state, opts = null) {
   if (!state.projectPath) throw new Error("Nenhum projeto carregado.");
 
   const cfg = _loadExportSelectionConfig(state);
-  const selectedOnly = Boolean(opts?.selectedOnly ?? cfg.selectedOnly);
+  const incomingProfile = opts?.exportProfile || null;
+  const profile = _normalizeExportProfile(incomingProfile || cfg.profile || null);
+  const selectedOnly = profile.scope === "selected";
   const selectedSet = opts?.selectedSet instanceof Set
     ? opts.selectedSet
     : (cfg.selectedSet instanceof Set ? cfg.selectedSet : new Set());
@@ -320,24 +361,26 @@ function buildExportModel(state, opts = null) {
 
     const relPath = String(safeRel(state.projectPath, p) || "").replaceAll("\\", "/");
     const decoded = _safeDecodeUtf8(p);
+    const includeContent = profile.content_level !== "compact";
+    const includeHashes = Boolean(profile.include_hashes);
 
     legacyModel.files.push({
       path: relPath,
       ext: m.ext,
       size_bytes: m.sizeBytes,
       mtime_ms: Number.isFinite(Number(m.mtimeMs)) ? Number(m.mtimeMs) : null,
-      encoding: decoded.encoding,
-      line_count: decoded.line_count,
-      sha256: decoded.sha256,
-      content: decoded.content,
-      content_error: decoded.content_error,
+      encoding: includeContent ? decoded.encoding : null,
+      line_count: includeContent ? decoded.line_count : null,
+      sha256: includeHashes ? decoded.sha256 : null,
+      content: includeContent ? decoded.content : null,
+      content_error: includeContent ? decoded.content_error : null,
     });
   }
   legacyModel.files.sort((a,b)=>a.path.localeCompare(b.path));
   return buildUnifiedProjectReport(
     state.projectPath,
     legacyModel,
-    { selectedOnly, selected_count: selectedCount },
+    { selectedOnly, selected_count: selectedCount, profile },
     { app_version: null }
   );
 }
@@ -357,22 +400,24 @@ async function exportTxt(outPath, model, projectPath, log) {
   lines.push(`Exported files: ${Number(report.export?.exported_files_count || report.files?.length || 0)}`);
   lines.push("");
 
-  lines.push("EXPORTED TREE");
-  lines.push("-".repeat(72));
-  const walkTree = (node, depth) => {
-    if (!node) return;
-    if (depth > 0) {
-      const pad = "  ".repeat(Math.max(0, depth - 1));
-      lines.push(`${pad}${node.name}${node.type === "dir" ? "/" : ""}`);
-    }
-    if (Array.isArray(node.children)) {
-      for (const ch of node.children) walkTree(ch, depth + 1);
-    }
-  };
-  walkTree(report.tree, 0);
-  lines.push("");
+  if (report.export?.profile?.include_tree !== false) {
+    lines.push("EXPORTED TREE");
+    lines.push("-".repeat(72));
+    const walkTree = (node, depth) => {
+      if (!node) return;
+      if (depth > 0) {
+        const pad = "  ".repeat(Math.max(0, depth - 1));
+        lines.push(`${pad}${node.name}${node.type === "dir" ? "/" : ""}`);
+      }
+      if (Array.isArray(node.children)) {
+        for (const ch of node.children) walkTree(ch, depth + 1);
+      }
+    };
+    walkTree(report.tree, 0);
+    lines.push("");
+  }
 
-  if (Array.isArray(report.ignored) && report.ignored.length) {
+  if (report.export?.profile?.include_ignored_summary !== false && Array.isArray(report.ignored) && report.ignored.length) {
     lines.push("Ignored:");
     for (const ig of report.ignored) lines.push(`- ${ig}`);
     lines.push("");

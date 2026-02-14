@@ -8,6 +8,7 @@ Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2
 const { ipcRenderer } = require("electron");
 const fs = require("fs");
 const path = require("path");
+const { DEFAULT_IGNORE_EXTS } = require("./config");
 const el = (id) => document.getElementById(id);
 
 const expanded = new Set();
@@ -1530,6 +1531,8 @@ function _collectExportableFromSelection(snapshot) {
 
   for (const r of fileRows) {
     if (ignoredSet.has(r.absPath)) continue;
+    const ext = path.extname(String(r.absPath || "")) || "";
+    if (DEFAULT_IGNORE_EXTS && DEFAULT_IGNORE_EXTS.has && DEFAULT_IGNORE_EXTS.has(ext)) continue;
     const rp = _normalizeAbsPath(r.absPath);
     let picked = selected.has(rp);
     if (!picked) {
@@ -1544,6 +1547,39 @@ function _collectExportableFromSelection(snapshot) {
     if (picked) out.add(rp);
   }
   return out;
+}
+
+function _countExportableAll(snapshot) {
+  const ignoredSet = new Set(snapshot?.ignored || []);
+  let count = 0;
+  const walk = (n) => {
+    if (!n) return;
+    if (!n.isDir) {
+      const abs = String(n.absPath || "");
+      if (!ignoredSet.has(abs)) {
+        const ext = path.extname(abs) || "";
+        if (!(DEFAULT_IGNORE_EXTS && DEFAULT_IGNORE_EXTS.has && DEFAULT_IGNORE_EXTS.has(ext))) count += 1;
+      }
+      return;
+    }
+    for (const ch of n.children || []) walk(ch);
+  };
+  walk(snapshot?.tree);
+  return count;
+}
+
+function _buildExportProfile() {
+  return {
+    profile_id: "default",
+    format: _exportUi.type === "json" ? "json" : "txt",
+    scope: _exportSelectionState.selectedMode === "selected" ? "selected" : "all",
+    content_level: ["compact", "standard", "full"].includes(_exportUi.contentLevel) ? _exportUi.contentLevel : "standard",
+    include_tree: Boolean(_exportUi.options.treeHeader),
+    include_hashes: Boolean(_exportUi.options.hashes),
+    include_ignored_summary: Boolean(_exportUi.options.ignoredSummary),
+    sort_mode: _exportUi.options.sortDet === false ? "alpha" : "dir_first_alpha",
+    schema_version: 1,
+  };
 }
 
 function _updateExportSelectionMeta(snapshot) {
@@ -1564,6 +1600,7 @@ function _writeExportSelectionConfig(snapshot) {
     const payload = {
       selectedOnly: _exportSelectionState.selectedMode === "selected",
       selectedMode: _exportSelectionState.selectedMode,
+      profile: _buildExportProfile(),
       selected: Array.from(_exportSelectionState.selected).map((p) => _normalizeAbsPath(p)),
       updatedAt: new Date().toISOString(),
     };
@@ -1619,12 +1656,15 @@ function _syncExportUiControls() {
 function _updateExportLiveSummary(snapshot) {
   const elSum = el("exportLiveSummary");
   if (!elSum) return;
-  const mode = _exportSelectionState.selectedMode === "selected" ? "Selected" : "All";
+  const profile = _buildExportProfile();
+  const mode = profile.scope === "selected" ? "Selected" : "All";
   const selected = _exportSelectionState.selected.size;
-  const resolved = _collectExportableFromSelection(snapshot || lastSnapshot || {}).size;
-  const avgBytes = 380;
+  const resolved = profile.scope === "selected"
+    ? _collectExportableFromSelection(snapshot || lastSnapshot || {}).size
+    : _countExportableAll(snapshot || lastSnapshot || {});
+  const avgBytes = profile.content_level === "compact" ? 120 : profile.content_level === "full" ? 850 : 380;
   const estKb = Math.max(1, Math.round(((resolved || (snapshot?.stats?.files || 0)) * avgBytes) / 1024));
-  elSum.textContent = `Mode: ${mode} · Selected: ${selected} · Resolved files: ${resolved} · Format: ${String(_exportUi.type || "txt").toUpperCase()} · Estimated size: ~${estKb} KB`;
+  elSum.textContent = `Mode: ${mode} · Selected: ${selected} · Resolved files: ${resolved} · Format: ${String(profile.format || "txt").toUpperCase()} · Tree: ${profile.include_tree ? "yes" : "no"} · Estimated size: ~${estKb} KB`;
 }
 
 async function _runExportByType(type) {
@@ -2679,6 +2719,10 @@ async function _confirmApplyFromDiffModal() {
 
 function bind() {
   _loadExportUiConfig();
+  try{
+    const prof = _buildExportProfile();
+    _exportSelectionState.selectedMode = prof.scope === "selected" ? "selected" : "all";
+  }catch{}
   setTabs();
   _bindFileListVirtualEvents();
 

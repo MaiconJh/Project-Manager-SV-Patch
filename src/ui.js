@@ -25,6 +25,16 @@ const _exportSelectionState = {
   selectedMode: "all", // all | selected
 };
 const _exportSelectionFile = ".pm_sv_export_selection.json";
+const _exportUi = {
+  type: "txt", // txt | json
+  contentLevel: "standard", // compact | standard | full
+  options: {
+    treeHeader: true,
+    ignoredSummary: true,
+    hashes: false,
+    sortDet: true,
+  },
+};
 
 const _applyDiffState = {
   open: false,
@@ -1538,10 +1548,12 @@ function _collectExportableFromSelection(snapshot) {
 
 function _updateExportSelectionMeta(snapshot) {
   const countEl = el("exportSelectedCount");
-  if (!countEl) return;
   const selectedCount = _exportSelectionState.selected.size;
   const resolved = _collectExportableFromSelection(snapshot || lastSnapshot || {}).size;
-  countEl.textContent = `Selected: ${selectedCount} · Resolved files: ${resolved}`;
+  if (countEl) countEl.textContent = `Selected: ${selectedCount} · Resolved files: ${resolved}`;
+  const countElTab = el("exportSelectedCountTab");
+  if (countElTab) countElTab.textContent = `Selected: ${selectedCount} · Resolved files: ${resolved}`;
+  _updateExportLiveSummary(snapshot);
 }
 
 function _writeExportSelectionConfig(snapshot) {
@@ -1557,6 +1569,73 @@ function _writeExportSelectionConfig(snapshot) {
     };
     fs.writeFileSync(cfgPath, JSON.stringify(payload, null, 2), "utf-8");
   } catch {}
+}
+
+function _loadExportUiConfig() {
+  try {
+    const raw = localStorage.getItem("pm_sv_export_ui_v1");
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    if (obj?.type === "txt" || obj?.type === "json") _exportUi.type = obj.type;
+    if (["compact", "standard", "full"].includes(obj?.contentLevel)) _exportUi.contentLevel = obj.contentLevel;
+    if (obj && typeof obj.options === "object") {
+      _exportUi.options.treeHeader = Boolean(obj.options.treeHeader ?? _exportUi.options.treeHeader);
+      _exportUi.options.ignoredSummary = Boolean(obj.options.ignoredSummary ?? _exportUi.options.ignoredSummary);
+      _exportUi.options.hashes = Boolean(obj.options.hashes ?? _exportUi.options.hashes);
+      _exportUi.options.sortDet = Boolean(obj.options.sortDet ?? _exportUi.options.sortDet);
+    }
+  } catch {}
+}
+
+function _saveExportUiConfig() {
+  try {
+    localStorage.setItem("pm_sv_export_ui_v1", JSON.stringify(_exportUi));
+  } catch {}
+}
+
+function _syncExportUiControls() {
+  const typeTxt = el("btnExportTypeTxt");
+  const typeJson = el("btnExportTypeJson");
+  if (typeTxt) typeTxt.classList.toggle("active", _exportUi.type === "txt");
+  if (typeJson) typeJson.classList.toggle("active", _exportUi.type === "json");
+
+  const cCompact = el("btnContentCompact");
+  const cStandard = el("btnContentStandard");
+  const cFull = el("btnContentFull");
+  if (cCompact) cCompact.classList.toggle("active", _exportUi.contentLevel === "compact");
+  if (cStandard) cStandard.classList.toggle("active", _exportUi.contentLevel === "standard");
+  if (cFull) cFull.classList.toggle("active", _exportUi.contentLevel === "full");
+
+  const oTree = el("optTreeHeader");
+  const oIgnored = el("optIgnoredSummary");
+  const oHashes = el("optHashes");
+  const oSort = el("optSortDet");
+  if (oTree) oTree.checked = Boolean(_exportUi.options.treeHeader);
+  if (oIgnored) oIgnored.checked = Boolean(_exportUi.options.ignoredSummary);
+  if (oHashes) oHashes.checked = Boolean(_exportUi.options.hashes);
+  if (oSort) oSort.checked = Boolean(_exportUi.options.sortDet);
+}
+
+function _updateExportLiveSummary(snapshot) {
+  const elSum = el("exportLiveSummary");
+  if (!elSum) return;
+  const mode = _exportSelectionState.selectedMode === "selected" ? "Selected" : "All";
+  const selected = _exportSelectionState.selected.size;
+  const resolved = _collectExportableFromSelection(snapshot || lastSnapshot || {}).size;
+  const avgBytes = 380;
+  const estKb = Math.max(1, Math.round(((resolved || (snapshot?.stats?.files || 0)) * avgBytes) / 1024));
+  elSum.textContent = `Mode: ${mode} · Selected: ${selected} · Resolved files: ${resolved} · Format: ${String(_exportUi.type || "txt").toUpperCase()} · Estimated size: ~${estKb} KB`;
+}
+
+async function _runExportByType(type) {
+  const t = String(type || _exportUi.type || "txt").toLowerCase();
+  if (t === "json") {
+    showToast("Exporting JSON…", { type: "info", ttl: 1800 });
+    await ipcRenderer.invoke("export:json");
+    return;
+  }
+  showToast("Exporting TXT…", { type: "info", ttl: 1800 });
+  await ipcRenderer.invoke("export:txt");
 }
 
 function _buildFileRow(r, snapshot) {
@@ -1791,6 +1870,9 @@ function render(snapshot) {
   el("statusLine").textContent = snapshot.status || "Ready.";
   const chkSelectedOnly = el("chkExportSelectedOnly");
   if (chkSelectedOnly) chkSelectedOnly.checked = _exportSelectionState.selectedMode === "selected";
+  const chkSelectedOnlyTab = el("chkExportSelectedOnlyTab");
+  if (chkSelectedOnlyTab) chkSelectedOnlyTab.checked = _exportSelectionState.selectedMode === "selected";
+  _syncExportUiControls();
 
   el("stats").textContent =
     `Folders: ${snapshot.stats.folders} · Files: ${snapshot.stats.files} · Ignored: ${
@@ -2596,6 +2678,7 @@ async function _confirmApplyFromDiffModal() {
 }
 
 function bind() {
+  _loadExportUiConfig();
   setTabs();
   _bindFileListVirtualEvents();
 
@@ -2663,6 +2746,20 @@ function bind() {
 
   el("chkExportSelectedOnly")?.addEventListener("change", (e) => {
     _exportSelectionState.selectedMode = e?.target?.checked ? "selected" : "all";
+    const tabChk = el("chkExportSelectedOnlyTab");
+    if (tabChk) tabChk.checked = Boolean(e?.target?.checked);
+    _updateExportSelectionMeta(lastSnapshot);
+    if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
+  });
+
+  el("chkExportSelectedOnlyTab")?.addEventListener("change", (e) => {
+    const mainChk = el("chkExportSelectedOnly");
+    if (mainChk) {
+      mainChk.checked = Boolean(e?.target?.checked);
+      mainChk.dispatchEvent(new Event("change"));
+      return;
+    }
+    _exportSelectionState.selectedMode = e?.target?.checked ? "selected" : "all";
     _updateExportSelectionMeta(lastSnapshot);
     if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
   });
@@ -2685,13 +2782,54 @@ function bind() {
     if (lastSnapshot) render(lastSnapshot);
   });
 
+  el("btnSelectAllVisibleTab")?.addEventListener("click", () => {
+    el("btnSelectAllVisible")?.click();
+  });
+
+  el("btnClearSelectionTab")?.addEventListener("click", () => {
+    el("btnClearSelection")?.click();
+  });
+
+  const _setExportType = (t) => {
+    _exportUi.type = t === "json" ? "json" : "txt";
+    _syncExportUiControls();
+    _updateExportLiveSummary(lastSnapshot);
+    _saveExportUiConfig();
+  };
+
+  el("btnExportTypeTxt")?.addEventListener("click", () => _setExportType("txt"));
+  el("btnExportTypeJson")?.addEventListener("click", () => _setExportType("json"));
+
+  const _setContentLevel = (lvl) => {
+    if (!["compact", "standard", "full"].includes(lvl)) return;
+    _exportUi.contentLevel = lvl;
+    _syncExportUiControls();
+    _saveExportUiConfig();
+  };
+
+  el("btnContentCompact")?.addEventListener("click", () => _setContentLevel("compact"));
+  el("btnContentStandard")?.addEventListener("click", () => _setContentLevel("standard"));
+  el("btnContentFull")?.addEventListener("click", () => _setContentLevel("full"));
+
+  const _bindOpt = (id, key) => {
+    el(id)?.addEventListener("change", (ev) => {
+      _exportUi.options[key] = Boolean(ev?.target?.checked);
+      _saveExportUiConfig();
+    });
+  };
+  _bindOpt("optTreeHeader", "treeHeader");
+  _bindOpt("optIgnoredSummary", "ignoredSummary");
+  _bindOpt("optHashes", "hashes");
+  _bindOpt("optSortDet", "sortDet");
+  _syncExportUiControls();
+  _updateExportLiveSummary(lastSnapshot);
+
   el("btnExportTxt").addEventListener("click", async () => {
     const chk = el("chkExportSelectedOnly");
     if (chk) _exportSelectionState.selectedMode = chk.checked ? "selected" : "all";
     if (lastSnapshot) _cleanupSelectionWithSnapshot(lastSnapshot);
     if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
-    showToast("Exporting TXT…", { type: "info", ttl: 1800 });
-    await ipcRenderer.invoke("export:txt");
+    await _runExportByType("txt");
   });
 
   el("btnExportJson").addEventListener("click", async () => {
@@ -2699,8 +2837,19 @@ function bind() {
     if (chk) _exportSelectionState.selectedMode = chk.checked ? "selected" : "all";
     if (lastSnapshot) _cleanupSelectionWithSnapshot(lastSnapshot);
     if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
-    showToast("Exporting JSON…", { type: "info", ttl: 1800 });
-    await ipcRenderer.invoke("export:json");
+    await _runExportByType("json");
+  });
+
+  el("btnExportPrimary")?.addEventListener("click", async () => {
+    const tabChk = el("chkExportSelectedOnlyTab");
+    const mainChk = el("chkExportSelectedOnly");
+    if (mainChk && tabChk) mainChk.checked = Boolean(tabChk.checked);
+    if (mainChk) {
+      _exportSelectionState.selectedMode = mainChk.checked ? "selected" : "all";
+    }
+    if (lastSnapshot) _cleanupSelectionWithSnapshot(lastSnapshot);
+    if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
+    await _runExportByType(_exportUi.type);
   });
 
   el("btnCopyLogs").addEventListener("click", async () => {

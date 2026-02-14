@@ -1787,6 +1787,65 @@ body.has-apply-diff .applyDiffModal{
   flex-wrap:wrap;
 }
 
+.exportLegacyCard{
+  opacity:.88;
+}
+
+.exportPanel .exportGroup{
+  margin-top:10px;
+  padding-top:8px;
+  border-top:1px solid rgba(240,246,252,.08);
+}
+
+.exportPanel .exportGroup:first-of-type{
+  margin-top:6px;
+}
+
+.exportGroupTitle{
+  font-size:12px;
+  color:var(--muted);
+  margin-bottom:6px;
+}
+
+.segCtl{
+  display:inline-flex;
+  border:1px solid rgba(240,246,252,.14);
+  border-radius:8px;
+  overflow:hidden;
+  background:rgba(0,0,0,.22);
+}
+
+.segBtn{
+  border:0;
+  border-right:1px solid rgba(240,246,252,.10);
+  background:transparent;
+  color:var(--muted);
+  font-size:12px;
+  padding:6px 10px;
+  cursor:pointer;
+}
+
+.segBtn:last-child{
+  border-right:0;
+}
+
+.segBtn.active{
+  background:rgba(56,139,253,.2);
+  color:var(--text);
+}
+
+.optChk{
+  display:block;
+  font-size:12px;
+  color:var(--text);
+  margin:4px 0;
+}
+
+.optChk input{
+  margin-right:6px;
+  accent-color:rgba(56,139,253,.95);
+}
+
 /* =========================================================
    File Viewer editor UX add-ons: line numbers + find bar
    (visual + local editor chrome only)

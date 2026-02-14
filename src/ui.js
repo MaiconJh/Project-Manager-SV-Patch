@@ -1442,6 +1442,21 @@ function _cleanupExpandedPathsFromTree(tree){
   }catch{}
 }
 
+function _cleanupExpandedPathsFromTree(tree){
+  try{
+    const dirSet = new Set();
+    const walk = (n)=>{
+      if(!n) return;
+      if(n.isDir) dirSet.add(_normalizeAbsPath(n.absPath));
+      if(n.children && n.children.length) n.children.forEach(walk);
+    };
+    walk(tree);
+    for(const p of Array.from(expandedPaths)){
+      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
+    }
+  }catch{}
+}
+
 function flattenTree(node, depth, out, ignoredSet) {
   const hasChildren = node.isDir && node.children && node.children.length > 0;
   out.push({
@@ -1588,13 +1603,16 @@ function _collectDescendantsFromSnapshot(snapshot, folderPathNormalized) {
 
 function _collectSnapshotPathIndex(snapshot) {
   const all = new Set();
+  const dirs = new Set();
   const walk = (node) => {
     if (!node) return;
-    all.add(_normalizeAbsPath(node.absPath));
+    const normalized = _normalizeAbsPath(node.absPath);
+    all.add(normalized);
+    if (node.isDir || (Array.isArray(node.children) && node.children.length >= 0)) dirs.add(normalized);
     for (const ch of node.children || []) walk(ch);
   };
   walk(snapshot?.tree || null);
-  return { all };
+  return { all, dirs };
 }
 
 function _applyFolderSelection(selectedSet, folderPathNormalized, isSelecting, descendantsList) {
@@ -2191,7 +2209,15 @@ async function _applyPresetV1(snapshot, presetObj) {
       return;
     }
 
-    const idx = _collectSnapshotPathIndex(snapshot || {});
+    const idxRaw = _collectSnapshotPathIndex(snapshot || {});
+    const idx = {
+      all: idxRaw?.all instanceof Set ? idxRaw.all : new Set(),
+      dirs: idxRaw?.dirs instanceof Set ? idxRaw.dirs : new Set(),
+    };
+    if (__PM_UI_DEV__ && !(idxRaw?.dirs instanceof Set)) {
+      console.error("[PRESET] idx.dirs missing before apply", typeof idxRaw?.dirs, idxRaw?.dirs);
+    }
+
     const expandedSrc = Array.isArray(presetObj?.tree?.expanded_paths) ? presetObj.tree.expanded_paths : [];
     expandedPaths.clear();
     for (const ep of expandedSrc) {
@@ -2201,6 +2227,7 @@ async function _applyPresetV1(snapshot, presetObj) {
 
     const requestedSelection = Array.isArray(presetObj?.export?.scope?.selected) ? presetObj.export.scope.selected : [];
     _exportSelectionState.selectedMode = presetObj?.export?.scope?.mode === "selected" ? "selected" : "all";
+    if (!(_exportSelectionState.selected instanceof Set)) _exportSelectionState.selected = new Set();
     _exportSelectionState.selected.clear();
     for (const p0 of requestedSelection) {
       const p = _normalizeAbsPath(p0);

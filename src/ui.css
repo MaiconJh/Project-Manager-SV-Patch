@@ -1689,6 +1689,7 @@ body.has-apply-diff .applyDiffModal{
   position:relative;
   height:100%;
   display:none;
+  pointer-events:auto;
 }
 
 .fvEditMain{
@@ -1728,8 +1729,9 @@ body.has-apply-diff .applyDiffModal{
 .fvFindBar{
   position:absolute;
   top:8px;
-  right:10px;
-  z-index:2;
+  left:50%;
+  transform:translateX(-50%);
+  z-index:6;
   display:flex;
   align-items:center;
   gap:6px;
@@ -1738,6 +1740,8 @@ body.has-apply-diff .applyDiffModal{
   border-radius:8px;
   background:rgba(13,17,23,.94);
   box-shadow:0 8px 20px rgba(0,0,0,.35);
+  pointer-events:auto;
+  max-width:calc(100% - 28px);
 }
 
 .fvFindInput{
@@ -1842,8 +1846,8 @@ body.has-apply-diff .applyDiffModal{
   display:none !important;
 }
 
-.fvCard[data-find-open="0"] .fvFindBar{
-  pointer-events:none;
+.fvCard[data-find-open="1"] .fvFindBar{
+  pointer-events:auto;
 }
 
 /* IDE-like find overlay inside textarea stack (non-destructive) */

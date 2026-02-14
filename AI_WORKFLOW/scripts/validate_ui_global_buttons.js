@@ -77,12 +77,18 @@ if (missingPrivateRefs.length) {
   console.log('  - ' + missingPrivateRefs.join(', '));
 }
 
-if (!definedPrivate.has('_refreshPresetControlsUi')) {
-  console.log('  - required private function missing: _refreshPresetControlsUi');
-  process.exit(1);
+const requiredPrivate = [
+  '_refreshPresetControlsUi',
+  '_markPresetRefreshCycle',
+  '_maybeAutoApplyPreset',
+];
+const missingRequiredPrivate = requiredPrivate.filter((name) => !definedPrivate.has(name));
+if (missingRequiredPrivate.length) {
+  console.log('Missing required preset compatibility functions:');
+  console.log('  - ' + missingRequiredPrivate.join(', '));
 }
 
-if (missingIds.length || missingBindings.length || missingIpc.length || missingPrivateRefs.length) {
+if (missingIds.length || missingBindings.length || missingIpc.length || missingPrivateRefs.length || missingRequiredPrivate.length) {
   process.exit(1);
 }
 console.log('PASS UI wiring integrity');

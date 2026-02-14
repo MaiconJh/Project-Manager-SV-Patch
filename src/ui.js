@@ -1442,21 +1442,6 @@ function _cleanupExpandedPathsFromTree(tree){
   }catch{}
 }
 
-function _cleanupExpandedPathsFromTree(tree){
-  try{
-    const dirSet = new Set();
-    const walk = (n)=>{
-      if(!n) return;
-      if(n.isDir) dirSet.add(_normalizeAbsPath(n.absPath));
-      if(n.children && n.children.length) n.children.forEach(walk);
-    };
-    walk(tree);
-    for(const p of Array.from(expandedPaths)){
-      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
-    }
-  }catch{}
-}
-
 function flattenTree(node, depth, out, ignoredSet) {
   const hasChildren = node.isDir && node.children && node.children.length > 0;
   out.push({
@@ -2123,6 +2108,18 @@ function _refreshPresetControlsUi() {
   } else {
     _setPresetFeedback("Preset: idle", "none");
   }
+}
+
+function _markPresetRefreshCycle() {
+  try {
+    _exportPresetState.applyToken = Number(_exportPresetState.applyToken || 0) + 1;
+  } catch {}
+}
+
+function _maybeAutoApplyPreset(_snapshot) {
+  // File-based preset workflow is explicit/manual-only.
+  // Keep as compatibility no-op so legacy call sites cannot throw.
+  return false;
 }
 
 function _buildPresetV1(snapshot) {

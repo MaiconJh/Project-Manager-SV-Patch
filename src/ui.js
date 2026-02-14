@@ -1421,24 +1421,6 @@ function syncExpandedIdsFromPaths(tree){
       if(n.children && n.children.length) n.children.forEach(walk);
     };
     walk(tree);
-    for(const p of Array.from(expandedPaths)){
-      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
-    }
-  }catch{}
-}
-
-function _cleanupExpandedPathsFromTree(tree){
-  try{
-    const dirSet = new Set();
-    const walk = (n)=>{
-      if(!n) return;
-      if(n.isDir) dirSet.add(_normalizeAbsPath(n.absPath));
-      if(n.children && n.children.length) n.children.forEach(walk);
-    };
-    walk(tree);
-    for(const p of Array.from(expandedPaths)){
-      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
-    }
   }catch{}
 }
 
@@ -2141,21 +2123,39 @@ function _maybeAutoApplyPreset(_snapshot) {
 }
 
 function _buildPresetV1(snapshot) {
+  const selected = _normalizePathList(Array.from(_exportSelectionState.selected || []));
+  const hidden = _normalizePathList(snapshot?.ignored || []);
   return {
     schema_version: "preset.v1",
     created_at: new Date().toISOString(),
     project_root: String(snapshot?.projectPath || ""),
     export: {
-      profile: _buildExportProfile(),
+      profile: _sanitizeExportProfileForPreset(_buildExportProfile()),
       scope: {
         mode: _exportSelectionState.selectedMode === "selected" ? "selected" : "all",
-        selected: Array.from(_exportSelectionState.selected || []).map((p) => _normalizeAbsPath(p)),
+        selected,
       },
+      hidden_paths: hidden,
     },
     tree: {
-      expanded_paths: Array.from(expandedPaths || []).map((p) => _normalizeAbsPath(p)),
+      expanded_paths: _normalizePathList(Array.from(expandedPaths || [])),
     },
   };
+}
+
+
+function _sanitizeExportProfileForPreset(profile) {
+  const p = { ...(profile || {}) };
+  if (Object.prototype.hasOwnProperty.call(p, "schema_version")) {
+    p.export_schema_version = p.schema_version;
+    delete p.schema_version;
+  }
+  return p;
+}
+
+function _normalizePathList(list) {
+  if (!Array.isArray(list)) return [];
+  return Array.from(new Set(list.map((p) => _normalizeAbsPath(p)).filter(Boolean)));
 }
 
 function _validatePresetV1(presetObj, snapshot) {
@@ -2169,18 +2169,28 @@ function _validatePresetV1(presetObj, snapshot) {
   return { ok: true };
 }
 
-function _classifyPresetApplyHealth(snapshot, requestedSelection) {
+function _classifyPresetApplyHealth(snapshot, requestedSelection, requestedHidden) {
   const idx = _collectSnapshotPathIndex(snapshot || {});
-  const req = Array.isArray(requestedSelection) ? requestedSelection.map((p) => _normalizeAbsPath(p)).filter(Boolean) : [];
-  let resolved = 0;
-  let missing = 0;
-  for (const p of req) {
-    if (idx.all.has(p)) resolved += 1;
-    else missing += 1;
+  const reqSel = _normalizePathList(requestedSelection || []);
+  const reqHidden = _normalizePathList(requestedHidden || []);
+  let selResolved = 0;
+  let selMissing = 0;
+  for (const p of reqSel) {
+    if (idx.all.has(p)) selResolved += 1;
+    else selMissing += 1;
   }
-  if (resolved === 0 && req.length > 0) return { status: "BROKEN", missing };
-  if (missing > 0) return { status: "PARTIAL", missing };
-  return { status: "OK", missing: 0 };
+  let hiddenResolved = 0;
+  let hiddenMissing = 0;
+  for (const p of reqHidden) {
+    if (idx.all.has(p)) hiddenResolved += 1;
+    else hiddenMissing += 1;
+  }
+  const requestedTotal = reqSel.length + reqHidden.length;
+  const resolvedTotal = selResolved + hiddenResolved;
+  const missing = selMissing + hiddenMissing;
+  let status = "OK";
+  if (missing > 0) status = resolvedTotal > 0 || requestedTotal === 0 ? "PARTIAL" : "BROKEN";
+  return { status, missing, hiddenResolved, hiddenRequested: reqHidden.length, selResolved, selRequested: reqSel.length };
 }
 
 function _applyExportProfileToUi(profile) {
@@ -2225,7 +2235,8 @@ async function _applyPresetV1(snapshot, presetObj) {
       if (p && idx.dirs.has(p)) expandedPaths.add(p);
     }
 
-    const requestedSelection = Array.isArray(presetObj?.export?.scope?.selected) ? presetObj.export.scope.selected : [];
+    const requestedSelection = _normalizePathList(presetObj?.export?.scope?.selected || []);
+    const requestedHidden = _normalizePathList(presetObj?.export?.hidden_paths || []);
     _exportSelectionState.selectedMode = presetObj?.export?.scope?.mode === "selected" ? "selected" : "all";
     if (!(_exportSelectionState.selected instanceof Set)) _exportSelectionState.selected = new Set();
     _exportSelectionState.selected.clear();
@@ -2242,7 +2253,25 @@ async function _applyPresetV1(snapshot, presetObj) {
       }
     }
 
-    _applyExportProfileToUi(presetObj?.export?.profile || {});
+    const presetProfile = { ...(presetObj?.export?.profile || {}) };
+    if (!Object.prototype.hasOwnProperty.call(presetProfile, "schema_version") && Object.prototype.hasOwnProperty.call(presetProfile, "export_schema_version")) {
+      presetProfile.schema_version = presetProfile.export_schema_version;
+    }
+    _applyExportProfileToUi(presetProfile);
+
+    const hiddenToRestore = [];
+    for (const hp of requestedHidden) {
+      if (hp && idx.all.has(hp)) hiddenToRestore.push(hp);
+    }
+    try {
+      await ipcRenderer.invoke("tree:clearIgnored");
+      for (const hp of hiddenToRestore) {
+        await ipcRenderer.invoke("tree:toggleIgnored", hp);
+      }
+      if (snapshot && typeof snapshot === "object") snapshot.ignored = hiddenToRestore.slice();
+    } catch (hiddenErr) {
+      if (__PM_UI_DEV__) console.error("[PRESET] hidden restore failed", hiddenErr);
+    }
 
     if (token !== _exportPresetState.applyToken) return;
 
@@ -2256,11 +2285,11 @@ async function _applyPresetV1(snapshot, presetObj) {
     _updateExportSelectionMeta(snapshot);
     if (snapshot?.projectPath) _writeExportSelectionConfig(snapshot);
 
-    const h = _classifyPresetApplyHealth(snapshot, requestedSelection);
+    const h = _classifyPresetApplyHealth(snapshot, requestedSelection, requestedHidden);
     _exportPresetState.lastHealth = String(h.status || "OK").toLowerCase();
     const mode = h.status === "OK" ? "ok" : (h.status === "PARTIAL" ? "partial" : "broken");
-    _setPresetFeedbackTimed(`Applied preset: ${h.status} (missing: ${h.missing})`, mode, 5200);
-    try { addLog(`[PRESET] applied: ${h.status} missing=${h.missing}`); } catch {}
+    _setPresetFeedbackTimed(`Applied: ${h.status} (hidden restored: ${h.hiddenResolved}/${h.hiddenRequested})`, mode, 5200);
+    try { addLog(`[PRESET] applied: ${h.status} missing=${h.missing} hidden=${h.hiddenResolved}/${h.hiddenRequested}`); } catch {}
   } catch (e) {
     _setPresetFeedbackTimed(`Error: ${e?.message || e}`, "error", 5200);
     try { addLog(`[PRESET] apply error: ${e?.message || e}`); } catch {}
@@ -2298,7 +2327,7 @@ async function _savePresetToFile(snapshot) {
       return;
     }
     _exportPresetState.lastPresetPath = String(res.path || "");
-    _setPresetFeedbackTimed(`Saved: ${path.basename(String(res.path || "preset"))}`, "ok", 4200);
+    _setPresetFeedbackTimed(`Saved: ${path.basename(String(res.path || "preset"))} (hidden: ${preset.export.hidden_paths.length}, selected: ${preset.export.scope.selected.length})`, "ok", 4200);
     try { addLog(`[PRESET] saved: ${res.path}`); } catch {}
   } catch (e) {
     _setPresetFeedbackTimed(`Error: ${e?.message || e}`, "error", 5200);

@@ -1,6 +1,8 @@
 const fs = require("fs");
 const fsp = fs.promises;
 const path = require("path");
+const crypto = require("crypto");
+const { TextDecoder } = require("util");
 const { DEFAULT_IGNORE_EXTS, DEFAULT_IGNORE_DIRS, safeRel } = require("./config");
 
 function makeId() {
@@ -179,6 +181,114 @@ function _resolveSelectedFiles(state, selectedSet) {
   return out;
 }
 
+function _sha256Hex(text) {
+  try {
+    return crypto.createHash("sha256").update(String(text), "utf8").digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+function _safeDecodeUtf8(absPath) {
+  try {
+    const buf = fs.readFileSync(absPath);
+    if (!buf || !Buffer.isBuffer(buf)) {
+      return { encoding: null, line_count: null, sha256: null, content: null, content_error: "binary_or_decode_failed" };
+    }
+    // quick binary hint
+    for (let i = 0; i < Math.min(buf.length, 4096); i++) {
+      if (buf[i] === 0) {
+        return { encoding: null, line_count: null, sha256: null, content: null, content_error: "binary_or_decode_failed" };
+      }
+    }
+    const dec = new TextDecoder("utf-8", { fatal: true });
+    const content = dec.decode(buf);
+    const line_count = content.length ? content.split(/\r?\n/).length : 0;
+    const sha256 = _sha256Hex(content);
+    return { encoding: "utf-8", line_count, sha256, content, content_error: null };
+  } catch {
+    return { encoding: null, line_count: null, sha256: null, content: null, content_error: "binary_or_decode_failed" };
+  }
+}
+
+function _treeAddFile(root, relPath, fileIndex) {
+  const parts = String(relPath || "").split("/").filter(Boolean);
+  let cur = root;
+  for (let i = 0; i < parts.length; i++) {
+    const name = parts[i];
+    const isLast = i === parts.length - 1;
+    const pathRel = parts.slice(0, i + 1).join("/");
+    if (isLast) {
+      cur.children.push({ type: "file", name, path: pathRel, file_index: fileIndex });
+      return;
+    }
+    let next = cur.children.find((c) => c.type === "dir" && c.name === name);
+    if (!next) {
+      next = { type: "dir", name, path: pathRel, children: [] };
+      cur.children.push(next);
+    }
+    cur = next;
+  }
+}
+
+function _sortTree(node) {
+  if (!node || !Array.isArray(node.children)) return;
+  for (const ch of node.children) _sortTree(ch);
+  node.children.sort((a, b) => {
+    const ta = a.type === "dir" ? 0 : 1;
+    const tb = b.type === "dir" ? 0 : 1;
+    if (ta !== tb) return ta - tb;
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
+}
+
+function buildUnifiedProjectReport(projectRootAbs, legacyModel, selectionState = {}, options = {}) {
+  const files = Array.isArray(legacyModel?.files) ? legacyModel.files : [];
+  const ignored = Array.isArray(legacyModel?.ignored) ? legacyModel.ignored.slice() : [];
+  const mode = selectionState.selectedOnly ? "selected" : "all";
+  const selectedCount = Number(selectionState.selected_count || 0);
+
+  const tree = { type: "dir", name: ".", path: "", children: [] };
+  const byPath = {};
+  for (let i = 0; i < files.length; i++) {
+    const rel = String(files[i].path || "").replaceAll("\\", "/");
+    _treeAddFile(tree, rel, i);
+    byPath[rel] = i;
+  }
+  _sortTree(tree);
+
+  return {
+    // canonical
+    schema_version: 1,
+    report_type: "project_report",
+    project: {
+      path: projectRootAbs,
+      generated_at: new Date().toISOString(),
+      generator: "Project Manager & SV Patch",
+      app_version: options.app_version ?? null,
+    },
+    export: {
+      mode,
+      selected_count: selectedCount,
+      exported_files_count: files.length,
+      filters: {
+        ignored_exts: Array.from(DEFAULT_IGNORE_EXTS).sort((a, b) => String(a).localeCompare(String(b))),
+        ignored_paths: ignored.slice().sort((a, b) => String(a).localeCompare(String(b))),
+      },
+    },
+    tree,
+    files,
+    index: {
+      by_path: byPath,
+    },
+
+    // compatibility (legacy keys kept)
+    project_path: legacyModel?.project_path || projectRootAbs,
+    generated_at: legacyModel?.generated_at || new Date().toISOString().replace("T", " ").slice(0, 19),
+    ignored,
+  };
+}
+
 function buildExportModel(state, opts = null) {
   if (!state.projectPath) throw new Error("Nenhum projeto carregado.");
 
@@ -188,8 +298,9 @@ function buildExportModel(state, opts = null) {
     ? opts.selectedSet
     : (cfg.selectedSet instanceof Set ? cfg.selectedSet : new Set());
   const resolvedSelectedFiles = selectedOnly ? _resolveSelectedFiles(state, selectedSet) : null;
+  const selectedCount = selectedOnly ? selectedSet.size : 0;
 
-  const model = {
+  const legacyModel = {
     project_path: state.projectPath,
     generated_at: new Date().toISOString().replace("T"," ").slice(0,19),
     ignored: [],
@@ -197,9 +308,9 @@ function buildExportModel(state, opts = null) {
   };
 
   for (const p of state.ignored) {
-    model.ignored.push(safeRel(state.projectPath, p));
+    legacyModel.ignored.push(safeRel(state.projectPath, p));
   }
-  model.ignored.sort((a,b)=>a.localeCompare(b));
+  legacyModel.ignored.sort((a,b)=>a.localeCompare(b));
 
   for (const [p, m] of state.index.entries()) {
     if (m.isDir) continue;
@@ -207,15 +318,28 @@ function buildExportModel(state, opts = null) {
     if (state.ignored.has(p)) continue;
     if (DEFAULT_IGNORE_EXTS.has(m.ext)) continue;
 
-    model.files.push({
-      path: safeRel(state.projectPath, p),
+    const relPath = String(safeRel(state.projectPath, p) || "").replaceAll("\\", "/");
+    const decoded = _safeDecodeUtf8(p);
+
+    legacyModel.files.push({
+      path: relPath,
       ext: m.ext,
       size_bytes: m.sizeBytes,
-      mtime_ms: m.mtimeMs,
+      mtime_ms: Number.isFinite(Number(m.mtimeMs)) ? Number(m.mtimeMs) : null,
+      encoding: decoded.encoding,
+      line_count: decoded.line_count,
+      sha256: decoded.sha256,
+      content: decoded.content,
+      content_error: decoded.content_error,
     });
   }
-  model.files.sort((a,b)=>a.path.localeCompare(b.path));
-  return model;
+  legacyModel.files.sort((a,b)=>a.path.localeCompare(b.path));
+  return buildUnifiedProjectReport(
+    state.projectPath,
+    legacyModel,
+    { selectedOnly, selected_count: selectedCount },
+    { app_version: null }
+  );
 }
 
 async function exportJson(outPath, model) {
@@ -223,31 +347,48 @@ async function exportJson(outPath, model) {
 }
 
 async function exportTxt(outPath, model, projectPath, log) {
+  const report = model || {};
   const lines = [];
   lines.push("PROJECT REPORT");
   lines.push("=".repeat(72));
-  lines.push(`Project: ${projectPath}`);
-  lines.push(`Generated: ${model.generated_at}`);
+  lines.push(`Project: ${report.project?.path || projectPath}`);
+  lines.push(`Generated: ${report.project?.generated_at || report.generated_at || ""}`);
+  lines.push(`Mode: ${report.export?.mode || "all"}`);
+  lines.push(`Exported files: ${Number(report.export?.exported_files_count || report.files?.length || 0)}`);
   lines.push("");
 
-  if (model.ignored.length) {
+  lines.push("EXPORTED TREE");
+  lines.push("-".repeat(72));
+  const walkTree = (node, depth) => {
+    if (!node) return;
+    if (depth > 0) {
+      const pad = "  ".repeat(Math.max(0, depth - 1));
+      lines.push(`${pad}${node.name}${node.type === "dir" ? "/" : ""}`);
+    }
+    if (Array.isArray(node.children)) {
+      for (const ch of node.children) walkTree(ch, depth + 1);
+    }
+  };
+  walkTree(report.tree, 0);
+  lines.push("");
+
+  if (Array.isArray(report.ignored) && report.ignored.length) {
     lines.push("Ignored:");
-    for (const ig of model.ignored) lines.push(`- ${ig}`);
+    for (const ig of report.ignored) lines.push(`- ${ig}`);
     lines.push("");
   }
 
-  for (const file of model.files) {
-    const abs = path.join(projectPath, file.path);
+  const files = Array.isArray(report.files) ? report.files : [];
+  for (const file of files) {
     lines.push("-".repeat(72));
     lines.push(`File: ${file.path}`);
-    lines.push(`Ext: ${file.ext}`);
+    lines.push(`Ext: ${file.ext} · Bytes: ${file.size_bytes ?? 0} · Lines: ${file.line_count ?? "-"} · Encoding: ${file.encoding || "-"}`);
     lines.push("");
-    try {
-      const content = await fsp.readFile(abs, "utf-8");
-      lines.push(content);
-    } catch (e) {
-      lines.push(`[Could not read: ${e.message || e}]`);
-      if (log) log("WARNING", `Não foi possível ler: ${abs}`);
+    if (typeof file.content === "string") {
+      lines.push(file.content);
+    } else {
+      lines.push(`[Could not read: ${file.content_error || "binary_or_decode_failed"}]`);
+      if (log) log("WARNING", `Não foi possível ler: ${file.path}`);
     }
     lines.push("");
   }
@@ -262,6 +403,7 @@ module.exports = {
   clearIgnored,
   computeStats,
   buildExportModel,
+  buildUnifiedProjectReport,
   exportJson,
   exportTxt,
 };

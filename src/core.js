@@ -136,8 +136,58 @@ function computeStats(state) {
   };
 }
 
-function buildExportModel(state) {
+function _normalizePath(p) {
+  return String(p || "").replaceAll("\\", "/");
+}
+
+function _isPathWithinFolder(filePath, folderPath) {
+  const fp = _normalizePath(filePath);
+  const base = _normalizePath(folderPath);
+  if (!fp || !base) return false;
+  return fp === base || fp.startsWith(base.endsWith("/") ? base : (base + "/"));
+}
+
+function _loadExportSelectionConfig(state) {
+  try {
+    const cfgPath = path.join(state.projectPath, ".pm_sv_export_selection.json");
+    if (!fs.existsSync(cfgPath)) return { selectedOnly: false, selectedSet: new Set() };
+    const raw = fs.readFileSync(cfgPath, "utf-8");
+    const obj = JSON.parse(raw || "{}");
+    const selectedOnly = Boolean(obj?.selectedOnly || String(obj?.selectedMode || "").toLowerCase() === "selected");
+    const selected = Array.isArray(obj?.selected) ? obj.selected : [];
+    return { selectedOnly, selectedSet: new Set(selected.map(String)) };
+  } catch {
+    return { selectedOnly: false, selectedSet: new Set() };
+  }
+}
+
+function _resolveSelectedFiles(state, selectedSet) {
+  const out = new Set();
+  const selected = Array.from(selectedSet || []);
+  if (!selected.length) return out;
+
+  for (const [p, m] of state.index.entries()) {
+    if (!m || m.isDir) continue;
+    for (const sel of selected) {
+      if (_isPathWithinFolder(p, sel)) {
+        out.add(p);
+        break;
+      }
+    }
+  }
+
+  return out;
+}
+
+function buildExportModel(state, opts = null) {
   if (!state.projectPath) throw new Error("Nenhum projeto carregado.");
+
+  const cfg = _loadExportSelectionConfig(state);
+  const selectedOnly = Boolean(opts?.selectedOnly ?? cfg.selectedOnly);
+  const selectedSet = opts?.selectedSet instanceof Set
+    ? opts.selectedSet
+    : (cfg.selectedSet instanceof Set ? cfg.selectedSet : new Set());
+  const resolvedSelectedFiles = selectedOnly ? _resolveSelectedFiles(state, selectedSet) : null;
 
   const model = {
     project_path: state.projectPath,
@@ -153,6 +203,7 @@ function buildExportModel(state) {
 
   for (const [p, m] of state.index.entries()) {
     if (m.isDir) continue;
+    if (selectedOnly && !resolvedSelectedFiles.has(p)) continue;
     if (state.ignored.has(p)) continue;
     if (DEFAULT_IGNORE_EXTS.has(m.ext)) continue;
 

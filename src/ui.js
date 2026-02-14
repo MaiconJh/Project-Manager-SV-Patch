@@ -1417,14 +1417,52 @@ function _normalizeAbsPath(p) {
 }
 
 function _isSelectedPath(absPath) {
-  return _exportSelectionState.selected.has(String(absPath || ""));
+  const p = _normalizeAbsPath(absPath);
+  return _exportSelectionState.selected.has(p);
 }
 
 function _toggleSelectedPath(absPath) {
-  const p = String(absPath || "");
+  const p = _normalizeAbsPath(absPath);
   if (!p) return;
   if (_exportSelectionState.selected.has(p)) _exportSelectionState.selected.delete(p);
   else _exportSelectionState.selected.add(p);
+}
+
+function _collectDescendantsFromSnapshot(snapshot, folderPathNormalized) {
+  const out = [];
+  if (!snapshot?.tree || !folderPathNormalized) return out;
+
+  let target = null;
+  const walkFind = (node) => {
+    if (!node || target) return;
+    if (_normalizeAbsPath(node.absPath) === folderPathNormalized) {
+      target = node;
+      return;
+    }
+    for (const ch of node.children || []) walkFind(ch);
+  };
+  walkFind(snapshot.tree);
+  if (!target) return out;
+
+  const walkDesc = (node) => {
+    if (!node) return;
+    for (const ch of node.children || []) {
+      out.push(_normalizeAbsPath(ch.absPath));
+      walkDesc(ch);
+    }
+  };
+  walkDesc(target);
+  return out;
+}
+
+function _applyFolderSelection(selectedSet, folderPathNormalized, isSelecting, descendantsList) {
+  if (!selectedSet || !folderPathNormalized) return;
+  const all = [folderPathNormalized, ...(descendantsList || [])];
+  if (isSelecting) {
+    for (const p of all) selectedSet.add(_normalizeAbsPath(p));
+  } else {
+    for (const p of all) selectedSet.delete(_normalizeAbsPath(p));
+  }
 }
 
 function _cleanupSelectionWithSnapshot(snapshot) {
@@ -1436,13 +1474,14 @@ function _cleanupSelectionWithSnapshot(snapshot) {
     const indexSet = new Set();
     const walk = (node) => {
       if (!node) return;
-      indexSet.add(String(node.absPath || ""));
+      indexSet.add(_normalizeAbsPath(node.absPath));
       if (Array.isArray(node.children)) node.children.forEach(walk);
     };
     walk(snapshot.tree);
     const next = new Set();
     for (const p of _exportSelectionState.selected) {
-      if (indexSet.has(p)) next.add(p);
+      const pn = _normalizeAbsPath(p);
+      if (indexSet.has(pn)) next.add(pn);
     }
     _exportSelectionState.selected = next;
   } catch {}
@@ -1467,7 +1506,7 @@ function _collectExportableFromSelection(snapshot) {
   for (const r of fileRows) {
     if (ignoredSet.has(r.absPath)) continue;
     const rp = _normalizeAbsPath(r.absPath);
-    let picked = selected.has(r.absPath);
+    let picked = selected.has(rp);
     if (!picked) {
       for (const s of normSel) {
         if (!s) continue;
@@ -1477,7 +1516,7 @@ function _collectExportableFromSelection(snapshot) {
         }
       }
     }
-    if (picked) out.add(r.absPath);
+    if (picked) out.add(rp);
   }
   return out;
 }
@@ -1497,7 +1536,7 @@ function _writeExportSelectionConfig(snapshot) {
     const cfgPath = path.join(root, _exportSelectionFile);
     const payload = {
       selectedOnly: _exportSelectionState.selectedMode === "selected",
-      selected: Array.from(_exportSelectionState.selected),
+      selected: Array.from(_exportSelectionState.selected).map((p) => _normalizeAbsPath(p)),
       updatedAt: new Date().toISOString(),
     };
     fs.writeFileSync(cfgPath, JSON.stringify(payload, null, 2), "utf-8");
@@ -1555,7 +1594,14 @@ function _buildFileRow(r, snapshot) {
   row.querySelector("[data-select]")?.addEventListener("click", (e) => {
     e.stopPropagation();
     if (r.ignored) return;
-    _toggleSelectedPath(r.absPath);
+    const p = _normalizeAbsPath(r.absPath);
+    if (r.isDir) {
+      const descendants = _collectDescendantsFromSnapshot(snapshot, p);
+      const isSelecting = !_exportSelectionState.selected.has(p);
+      _applyFolderSelection(_exportSelectionState.selected, p, isSelecting, descendants);
+    } else {
+      _toggleSelectedPath(p);
+    }
     _updateExportSelectionMeta(snapshot);
     render(snapshot);
   });
@@ -2602,7 +2648,7 @@ function bind() {
     const ignoredSet = new Set(snapshot.ignored || []);
     for (const r of _fileRowsCache || []) {
       if (ignoredSet.has(r.absPath)) continue;
-      _exportSelectionState.selected.add(r.absPath);
+      _exportSelectionState.selected.add(_normalizeAbsPath(r.absPath));
     }
     _updateExportSelectionMeta(snapshot);
     render(snapshot);

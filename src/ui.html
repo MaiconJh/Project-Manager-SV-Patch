@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback. -->
 <!--
 PM-SV-PATCH META
 Version: pm-svpatch-ui@2026.02.11-r1
@@ -109,6 +110,40 @@ Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2
             <button class="actionBtn headBtn" id="btnRefreshFiles" title="Refresh files">
               <svg class="ico"><use href="#icon-refresh"></use></svg>
             </button>
+            <div class="presetQuick" id="presetQuickControls">
+              <button class="btn secondary tiny presetMenuBtn" id="btnPresetMenu" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="presetMenu">
+                <svg class="uiIcon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M2.5 5.5h8"></path>
+                  <path d="m8 3 2.5 2.5L8 8"></path>
+                  <path d="M13.5 10.5h-8"></path>
+                  <path d="m8 8 2.5 2.5L8 13"></path>
+                </svg>
+                <span>Preset</span>
+                <svg class="uiIcon uiIconChevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="m4.5 6.5 3.5 3.5 3.5-3.5"></path>
+                </svg>
+              </button>
+              <div class="presetMenu" id="presetMenu" role="menu" aria-label="Preset actions" hidden>
+                <button class="presetMenuItem" id="presetMenuSave" type="button" role="menuitem">
+                  <svg class="uiIcon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M8 2.5v7"></path>
+                    <path d="m5.5 7 2.5 2.5L10.5 7"></path>
+                    <path d="M3 11.5h10"></path>
+                  </svg>
+                  <span>Save preset…</span>
+                </button>
+                <button class="presetMenuItem" id="presetMenuImport" type="button" role="menuitem">
+                  <svg class="uiIcon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M8 13.5v-7"></path>
+                    <path d="m5.5 9 2.5-2.5L10.5 9"></path>
+                    <path d="M3 4.5h10"></path>
+                  </svg>
+                  <span>Import preset…</span>
+                </button>
+              </div>
+              <button class="btn secondary tiny presetLegacyBtn" id="btnPresetSaveFile" type="button">Save preset…</button>
+              <button class="btn secondary tiny presetLegacyBtn" id="btnPresetImportFile" type="button">Import preset…</button>
+            </div>
           </div>
           <div class="panelHeadTools">
             <div class="filesSearchWrap" id="filesSearchWrap">
@@ -117,6 +152,8 @@ Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2
             </div>
           </div>
           <div class="panelMeta" id="itemsCount">0 items</div>
+          <div class="panelMeta filesBreadcrumb" id="filesBreadcrumb" aria-label="Selected path" title="">(nothing selected)</div>
+          <div class="panelMeta presetFeedback" id="presetFeedback">Preset: None</div>
         </div>
 
         <div class="fileList" id="fileList"></div>
@@ -130,17 +167,32 @@ Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2
       <section class="panel right">
         <div class="tabs">
           <button class="tab active" data-tab="overview">Overview</button>
+          <button class="tab" data-tab="export">Export</button>
           <button class="tab" data-tab="logs">Logs</button>
           <button class="tab" data-tab="patch">Patch</button>
         </div>
 
         <div class="tabBody">
           <div class="tabPanel active" id="tab-overview">
-            <div class="card">
+            <div class="card exportLegacyCard" data-export-legacy="1">
               <div class="cardTitle">Export</div>
               <div class="cardRow">
                 <button class="btn primary" id="btnExportTxt">Export TXT</button>
                 <button class="btn secondary" id="btnExportJson">Export JSON</button>
+              </div>
+              <div class="cardRow exportSelRow">
+                <div class="exportSelToggleWrap">
+                  <span class="exportSelLabel">Export selected only</span>
+                  <label class="exportSelSwitch" aria-label="Export selected only">
+                    <input type="checkbox" id="chkExportSelectedOnly" aria-label="Export selected only" />
+                    <span class="exportSelSlider" aria-hidden="true"></span>
+                  </label>
+                </div>
+                <span class="hint exportSelCount" id="exportSelectedCount">Selected: 0</span>
+              </div>
+              <div class="cardRow exportSelActions">
+                <button class="btn secondary small" id="btnSelectAllVisible">Select all visible</button>
+                <button class="btn secondary small" id="btnClearSelection">Clear selection</button>
               </div>
               <div class="hint">Exports respect ignored items.</div>
             </div>
@@ -148,6 +200,66 @@ Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2
             <div class="card">
               <div class="cardTitle">Status</div>
               <div class="hint" id="statusLine">Ready.</div>
+            </div>
+          </div>
+
+          <div class="tabPanel" id="tab-export">
+            <div class="card exportPanel">
+              <div class="cardTitle">Export Type</div>
+
+              <div class="hint">Choose format and scope, then export using the primary action.</div>
+
+              <div class="exportGroup">
+                <div class="exportGroupTitle">Format</div>
+                <div class="segCtl" role="radiogroup" aria-label="Export format">
+                  <button type="button" class="segBtn active" data-export-type="txt" id="btnExportTypeTxt">TXT</button>
+                  <button type="button" class="segBtn" data-export-type="json" id="btnExportTypeJson">JSON</button>
+                </div>
+              </div>
+
+              <div class="exportGroup">
+                <div class="cardRow exportSelRow">
+                  <div class="exportSelToggleWrap">
+                    <span class="exportSelLabel">Export selected only</span>
+                    <label class="exportSelSwitch" aria-label="Export selected only">
+                      <input type="checkbox" id="chkExportSelectedOnlyTab" aria-label="Export selected only" />
+                      <span class="exportSelSlider" aria-hidden="true"></span>
+                    </label>
+                  </div>
+                  <span class="hint exportSelCount" id="exportSelectedCountTab">Selected: 0</span>
+                </div>
+              </div>
+
+              <div class="exportGroup">
+                <div class="exportGroupTitle">Content level <span class="hint">(coming soon)</span></div>
+                <div class="segCtl" role="radiogroup" aria-label="Content level">
+                  <button type="button" class="segBtn active" data-content-level="compact" id="btnContentCompact">Compact</button>
+                  <button type="button" class="segBtn" data-content-level="standard" id="btnContentStandard">Standard</button>
+                  <button type="button" class="segBtn" data-content-level="full" id="btnContentFull">Full</button>
+                </div>
+              </div>
+
+              <div class="exportGroup">
+                <div class="exportGroupTitle">Options <span class="hint">(coming soon)</span></div>
+                <label class="optChk"><input type="checkbox" id="optTreeHeader" checked /> Export tree in header</label>
+                <label class="optChk"><input type="checkbox" id="optIgnoredSummary" checked /> Include ignored summary</label>
+                <label class="optChk"><input type="checkbox" id="optHashes" /> Include hashes (sha256)</label>
+                <label class="optChk"><input type="checkbox" id="optSortDet" checked /> Sort: dirs first + alpha</label>
+              </div>
+
+              <div class="exportGroup">
+                <div class="exportGroupTitle">Live Summary</div>
+                <div class="hint" id="exportLiveSummary">Mode: All · Selected: 0 · Resolved files: 0 · Format: TXT · Estimated size: ~0 KB</div>
+              </div>
+
+              <div class="cardRow exportSelActions">
+                <button class="btn secondary small" id="btnSelectAllVisibleTab">Select all visible</button>
+                <button class="btn secondary small" id="btnClearSelectionTab">Clear selection</button>
+              </div>
+
+              <div class="cardRow">
+                <button class="btn primary" id="btnExportPrimary">Export</button>
+              </div>
             </div>
           </div>
 

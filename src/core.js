@@ -1,4 +1,4 @@
-// @context: export-profile unified-report txt-renderer
+// @context: export-profile unified-report schema-validation v1
 const fs = require("fs");
 const fsp = fs.promises;
 const path = require("path");
@@ -282,6 +282,81 @@ function _normalizeExportProfile(profile) {
   return p;
 }
 
+function _validateExportReportSchemaV1(report) {
+  const fail = (msg) => { throw new Error(`[export-schema-v1] ${msg}`); };
+  if (!report || typeof report !== "object") fail("report must be an object");
+
+  if (report.schema_version !== 1 && report.schema_version !== "1.0") {
+    fail(`schema_version must be 1 or "1.0"; got ${JSON.stringify(report.schema_version)}`);
+  }
+  if (typeof report.report_type !== "string") fail("report_type must be a string");
+
+  if (!report.project || typeof report.project !== "object") fail("project is required and must be an object");
+  if (typeof report.project.path !== "string" || !report.project.path) fail("project.path must be a non-empty string");
+  if (typeof report.project.generated_at !== "string" || !report.project.generated_at) fail("project.generated_at must be a non-empty string");
+
+  if (!report.export || typeof report.export !== "object") fail("export is required and must be an object");
+  if (!report.export.profile || typeof report.export.profile !== "object") fail("export.profile is required and must be an object");
+  if (!report.export.filters || typeof report.export.filters !== "object") fail("export.filters is required and must be an object");
+
+  const profile = report.export.profile;
+  if (!["txt", "json"].includes(profile.format)) fail(`export.profile.format invalid: ${JSON.stringify(profile.format)}`);
+  if (!["all", "selected"].includes(profile.scope)) fail(`export.profile.scope invalid: ${JSON.stringify(profile.scope)}`);
+  if (!["compact", "full"].includes(profile.content_level)) fail(`export.profile.content_level invalid: ${JSON.stringify(profile.content_level)}`);
+  if (typeof profile.include_tree !== "boolean") fail("export.profile.include_tree must be boolean");
+  if (typeof profile.include_hashes !== "boolean") fail("export.profile.include_hashes must be boolean");
+  if (typeof profile.include_ignored_summary !== "boolean") fail("export.profile.include_ignored_summary must be boolean");
+  if (!["alpha", "dir_first_alpha"].includes(profile.sort_mode)) fail(`export.profile.sort_mode invalid: ${JSON.stringify(profile.sort_mode)}`);
+
+  if (!Array.isArray(report.files)) fail("files must be an array");
+  if (!report.index || typeof report.index !== "object") fail("index must be an object");
+  if (!report.index.by_path || typeof report.index.by_path !== "object") fail("index.by_path must be an object map");
+
+  if (profile.include_tree === false && Object.prototype.hasOwnProperty.call(report, "tree")) {
+    fail("rule include_tree=false violated: top-level tree must be omitted");
+  }
+  if (profile.include_ignored_summary === false && Object.prototype.hasOwnProperty.call(report.export.filters, "ignored_paths")) {
+    fail("rule include_ignored_summary=false violated: export.filters.ignored_paths must be omitted");
+  }
+
+  const byPath = report.index.by_path;
+  for (let i = 0; i < report.files.length; i++) {
+    const f = report.files[i] || {};
+    const p = String(f.path || "");
+    if (!p) fail(`files[${i}].path must be a non-empty string`);
+    if (!Object.prototype.hasOwnProperty.call(byPath, p)) {
+      fail(`index.by_path missing entry for files[${i}].path=${p}`);
+    }
+
+    if (profile.include_hashes === false && typeof f.sha256 === "string" && f.sha256.trim()) {
+      fail(`rule include_hashes=false violated for file ${p}: sha256 contains a computed hash`);
+    }
+
+    if (profile.content_level === "compact") {
+      if (Object.prototype.hasOwnProperty.call(f, "content")) fail(`rule content_level=compact violated for file ${p}: key content must be omitted`);
+      if (Object.prototype.hasOwnProperty.call(f, "encoding")) fail(`rule content_level=compact violated for file ${p}: key encoding must be omitted`);
+      if (Object.prototype.hasOwnProperty.call(f, "line_count")) fail(`rule content_level=compact violated for file ${p}: key line_count must be omitted`);
+    }
+  }
+
+  return true;
+}
+
+/*
+Manual validator smoke test (dev only):
+node - <<'NODE'
+const { _validateExportReportSchemaV1 } = require('./src/core');
+const report = {
+  schema_version: '1.0', report_type: 'project-export',
+  project: { path: '/tmp/p', generated_at: new Date().toISOString(), generator: 'Project Manager & SV Patch', app_version: null },
+  export: { mode:'all', profile:{ format:'json', scope:'all', content_level:'full', include_tree:false, include_hashes:false, include_ignored_summary:false, sort_mode:'alpha' }, selected_count:0, exported_files_count:1, filters:{ ignored_exts:[] } },
+  files:[{ path:'a.txt', ext:'.txt', size_bytes:1, mtime_ms:0, sha256:null, content:'a', content_error:null }],
+  index:{ by_path:{ 'a.txt':0 } },
+};
+console.log(_validateExportReportSchemaV1(report) ? 'OK' : 'FAIL');
+NODE
+*/
+
 function buildUnifiedProjectReport(projectRootAbs, legacyModel, selectionState = {}, options = {}) {
   const files = Array.isArray(legacyModel?.files) ? legacyModel.files : [];
   const ignored = Array.isArray(legacyModel?.ignored) ? legacyModel.ignored.slice() : [];
@@ -393,12 +468,18 @@ function buildExportModel(state, opts = null) {
     });
   }
   legacyModel.files.sort((a,b)=>a.path.localeCompare(b.path));
-  return buildUnifiedProjectReport(
+  const report = buildUnifiedProjectReport(
     state.projectPath,
     legacyModel,
     { selectedOnly, selected_count: selectedCount, profile },
     { app_version: null }
   );
+
+  if (process && process.env && process.env.NODE_ENV !== "production") {
+    _validateExportReportSchemaV1(report);
+  }
+
+  return report;
 }
 
 async function exportJson(outPath, model) {
@@ -465,6 +546,7 @@ module.exports = {
   computeStats,
   buildExportModel,
   buildUnifiedProjectReport,
+  _validateExportReportSchemaV1,
   exportJson,
   exportTxt,
 };

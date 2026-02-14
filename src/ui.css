@@ -1621,6 +1621,32 @@ body.has-apply-diff .applyDiffModal{
   font-size:14px;
 }
 
+.panel.files .row.row-picked{
+  background:rgba(88,166,255,.10);
+}
+
+.panel.files .rowPick{
+  width:16px;
+  height:16px;
+  border:1px solid rgba(139,148,158,.65);
+  border-radius:4px;
+  background:rgba(13,17,23,.95);
+  cursor:pointer;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:0;
+}
+
+.panel.files .rowPick:checked{
+  accent-color:rgba(56,139,253,.95);
+}
+
+.panel.files .rowPick:disabled{
+  opacity:.5;
+  cursor:not-allowed;
+}
+
 .panel.files .actions{
   margin-left:auto;
   gap:4px;
@@ -1679,6 +1705,29 @@ body.has-apply-diff .applyDiffModal{
   height:16px;
   right:5px;
   border-radius:4px;
+}
+
+.exportSelRow{
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+}
+
+.exportSelToggle{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  font-size:12px;
+  color:var(--text);
+}
+
+.exportSelCount{
+  font-size:12px;
+}
+
+.exportSelActions{
+  gap:8px;
+  flex-wrap:wrap;
 }
 
 /* =========================================================

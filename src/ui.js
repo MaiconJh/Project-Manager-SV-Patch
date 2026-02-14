@@ -6,6 +6,8 @@ Contains: UI shell, file tree, file view cards (view/edit/markdown/raw/fullscree
 Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2) Refresh button alignment/feedback CSS (no logic changes).
 */
 const { ipcRenderer } = require("electron");
+const fs = require("fs");
+const path = require("path");
 const el = (id) => document.getElementById(id);
 
 const expanded = new Set();
@@ -18,6 +20,11 @@ let filesSearchDebounceTimer = null;
 let currentPipelinePath = null;
 let lastSnapshot = null;
 let _applyDiffPreviewNonce = 0;
+const _exportSelectionState = {
+  selected: new Set(),
+  selectedMode: "all", // all | selected
+};
+const _exportSelectionFile = ".pm_sv_export_selection.json";
 
 const _applyDiffState = {
   open: false,
@@ -1405,9 +1412,102 @@ function _virtualRange(total, rowH, viewportH, scrollTop, overscan) {
   return { start, end };
 }
 
+function _normalizeAbsPath(p) {
+  return String(p || "").replaceAll("\\", "/");
+}
+
+function _isSelectedPath(absPath) {
+  return _exportSelectionState.selected.has(String(absPath || ""));
+}
+
+function _toggleSelectedPath(absPath) {
+  const p = String(absPath || "");
+  if (!p) return;
+  if (_exportSelectionState.selected.has(p)) _exportSelectionState.selected.delete(p);
+  else _exportSelectionState.selected.add(p);
+}
+
+function _cleanupSelectionWithSnapshot(snapshot) {
+  try {
+    if (!snapshot?.projectPath) {
+      _exportSelectionState.selected.clear();
+      return;
+    }
+    const indexSet = new Set();
+    const walk = (node) => {
+      if (!node) return;
+      indexSet.add(String(node.absPath || ""));
+      if (Array.isArray(node.children)) node.children.forEach(walk);
+    };
+    walk(snapshot.tree);
+    const next = new Set();
+    for (const p of _exportSelectionState.selected) {
+      if (indexSet.has(p)) next.add(p);
+    }
+    _exportSelectionState.selected = next;
+  } catch {}
+}
+
+function _collectExportableFromSelection(snapshot) {
+  const ignoredSet = new Set(snapshot?.ignored || []);
+  const fileRows = [];
+  const walk = (n) => {
+    if (!n) return;
+    if (!n.isDir) {
+      fileRows.push({ absPath: String(n.absPath || "") });
+      return;
+    }
+    for (const ch of n.children || []) walk(ch);
+  };
+  walk(snapshot?.tree);
+  const out = new Set();
+  const selected = _exportSelectionState.selected;
+  const normSel = Array.from(selected).map((p) => _normalizeAbsPath(p));
+
+  for (const r of fileRows) {
+    if (ignoredSet.has(r.absPath)) continue;
+    const rp = _normalizeAbsPath(r.absPath);
+    let picked = selected.has(r.absPath);
+    if (!picked) {
+      for (const s of normSel) {
+        if (!s) continue;
+        if (rp === s || rp.startsWith(s.endsWith("/") ? s : s + "/")) {
+          picked = true;
+          break;
+        }
+      }
+    }
+    if (picked) out.add(r.absPath);
+  }
+  return out;
+}
+
+function _updateExportSelectionMeta(snapshot) {
+  const countEl = el("exportSelectedCount");
+  if (!countEl) return;
+  const selectedCount = _exportSelectionState.selected.size;
+  const resolved = _collectExportableFromSelection(snapshot || lastSnapshot || {}).size;
+  countEl.textContent = `Selected: ${selectedCount} · Resolved files: ${resolved}`;
+}
+
+function _writeExportSelectionConfig(snapshot) {
+  try {
+    const root = String(snapshot?.projectPath || "");
+    if (!root) return;
+    const cfgPath = path.join(root, _exportSelectionFile);
+    const payload = {
+      selectedOnly: _exportSelectionState.selectedMode === "selected",
+      selected: Array.from(_exportSelectionState.selected),
+      updatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(cfgPath, JSON.stringify(payload, null, 2), "utf-8");
+  } catch {}
+}
+
 function _buildFileRow(r, snapshot) {
   const row = document.createElement("div");
-  row.className = "row" + (r.id === selectedId ? " selected" : "") + (r.ignored ? " ignored" : "");
+  const picked = _isSelectedPath(r.absPath);
+  row.className = "row" + (r.id === selectedId ? " selected" : "") + (r.ignored ? " ignored" : "") + (picked ? " row-picked" : "");
 
   const indentPx = r.depth * 16;
 
@@ -1427,6 +1527,7 @@ function _buildFileRow(r, snapshot) {
 
   row.innerHTML = `
     <div class="rowLeft" style="padding-left:${indentPx}px">
+      <input type="checkbox" class="rowPick" data-select="1" aria-label="Select for export" ${picked ? "checked" : ""} ${r.ignored ? "disabled" : ""} />
       ${caret}
       <span class="fileIco">${icon}</span>
       <div class="name" title="${r.name}">${r.name}</div>
@@ -1444,10 +1545,18 @@ function _buildFileRow(r, snapshot) {
     const target = e.target;
     if (
       target.closest &&
-      (target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
+      (target.closest("[data-select]") || target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
     )
       return;
     selectedId = r.id;
+    render(snapshot);
+  });
+
+  row.querySelector("[data-select]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (r.ignored) return;
+    _toggleSelectedPath(r.absPath);
+    _updateExportSelectionMeta(snapshot);
     render(snapshot);
   });
 
@@ -1484,7 +1593,7 @@ function _buildFileRow(r, snapshot) {
     const target = e.target;
     if (
       target.closest &&
-      (target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
+      (target.closest("[data-select]") || target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
     )
       return;
 
@@ -1606,11 +1715,14 @@ function renderManifest(manifest) {
 
 function render(snapshot) {
   lastSnapshot = snapshot;
+  _cleanupSelectionWithSnapshot(snapshot);
 
   el("projectPath").textContent = snapshot.projectPath || "No folder opened";
   el("itemsCount").textContent = `${snapshot.stats.items} items`;
   _updateItemsCount(snapshot, null);
   el("statusLine").textContent = snapshot.status || "Ready.";
+  const chkSelectedOnly = el("chkExportSelectedOnly");
+  if (chkSelectedOnly) chkSelectedOnly.checked = _exportSelectionState.selectedMode === "selected";
 
   el("stats").textContent =
     `Folders: ${snapshot.stats.folders} · Files: ${snapshot.stats.files} · Ignored: ${
@@ -1706,6 +1818,7 @@ try{
   _fileRowsCache = rows;
   _fileRowsSnapshot = snapshot;
   _renderVirtualFileRows(list, rows, snapshot);
+  _updateExportSelectionMeta(snapshot);
 }
 
 function _previewActionLabel(action) {
@@ -2477,12 +2590,38 @@ function bind() {
     await ipcRenderer.invoke("tree:clearIgnored");
   });
 
+  el("chkExportSelectedOnly")?.addEventListener("change", (e) => {
+    _exportSelectionState.selectedMode = e?.target?.checked ? "selected" : "all";
+    _updateExportSelectionMeta(lastSnapshot);
+    if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
+  });
+
+  el("btnSelectAllVisible")?.addEventListener("click", () => {
+    const snapshot = lastSnapshot;
+    if (!snapshot) return;
+    const ignoredSet = new Set(snapshot.ignored || []);
+    for (const r of _fileRowsCache || []) {
+      if (ignoredSet.has(r.absPath)) continue;
+      _exportSelectionState.selected.add(r.absPath);
+    }
+    _updateExportSelectionMeta(snapshot);
+    render(snapshot);
+  });
+
+  el("btnClearSelection")?.addEventListener("click", () => {
+    _exportSelectionState.selected.clear();
+    _updateExportSelectionMeta(lastSnapshot);
+    if (lastSnapshot) render(lastSnapshot);
+  });
+
   el("btnExportTxt").addEventListener("click", async () => {
+    if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
     showToast("Exporting TXT…", { type: "info", ttl: 1800 });
     await ipcRenderer.invoke("export:txt");
   });
 
   el("btnExportJson").addEventListener("click", async () => {
+    if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
     showToast("Exporting JSON…", { type: "info", ttl: 1800 });
     await ipcRenderer.invoke("export:json");
   });

@@ -1421,6 +1421,9 @@ function syncExpandedIdsFromPaths(tree){
       if(n.children && n.children.length) n.children.forEach(walk);
     };
     walk(tree);
+    for(const p of Array.from(expandedPaths)){
+      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
+    }
   }catch{}
 }
 
@@ -1586,15 +1589,18 @@ function _collectDescendantsFromSnapshot(snapshot, folderPathNormalized) {
 function _collectSnapshotPathIndex(snapshot) {
   const all = new Set();
   const dirs = new Set();
+  const actualByNorm = new Map();
   const walk = (node) => {
     if (!node) return;
-    const normalized = _normalizeAbsPath(node.absPath);
+    const actual = String(node.absPath || "");
+    const normalized = _normalizeAbsPath(actual);
     all.add(normalized);
+    if (!actualByNorm.has(normalized)) actualByNorm.set(normalized, actual);
     if (node.isDir || (Array.isArray(node.children) && node.children.length >= 0)) dirs.add(normalized);
     for (const ch of node.children || []) walk(ch);
   };
   walk(snapshot?.tree || null);
-  return { all, dirs };
+  return { all, dirs, actualByNorm };
 }
 
 function _applyFolderSelection(selectedSet, folderPathNormalized, isSelecting, descendantsList) {
@@ -2153,9 +2159,18 @@ function _sanitizeExportProfileForPreset(profile) {
   return p;
 }
 
-function _normalizePathList(list) {
+function _normalizePathList(list, projectRoot = "") {
   if (!Array.isArray(list)) return [];
-  return Array.from(new Set(list.map((p) => _normalizeAbsPath(p)).filter(Boolean)));
+  const root = _normalizeAbsPath(projectRoot || "");
+  const out = [];
+  for (const raw of list) {
+    let p = String(raw || "").trim();
+    if (!p) continue;
+    p = _normalizeAbsPath(p);
+    if (root && !path.isAbsolute(p)) p = _normalizeAbsPath(path.join(root, p));
+    out.push(p);
+  }
+  return Array.from(new Set(out));
 }
 
 function _validatePresetV1(presetObj, snapshot) {
@@ -2235,9 +2250,34 @@ async function _applyPresetV1(snapshot, presetObj) {
       if (p && idx.dirs.has(p)) expandedPaths.add(p);
     }
 
-    const requestedSelection = _normalizePathList(presetObj?.export?.scope?.selected || []);
-    const requestedHidden = _normalizePathList(presetObj?.export?.hidden_paths || []);
+    const requestedSelection = _normalizePathList(presetObj?.export?.scope?.selected || [], snapshot?.projectPath || "");
+    const requestedHidden = _normalizePathList(presetObj?.export?.hidden_paths || [], snapshot?.projectPath || "");
     _exportSelectionState.selectedMode = presetObj?.export?.scope?.mode === "selected" ? "selected" : "all";
+
+    const presetProfile = { ...(presetObj?.export?.profile || {}) };
+    if (!Object.prototype.hasOwnProperty.call(presetProfile, "schema_version") && Object.prototype.hasOwnProperty.call(presetProfile, "export_schema_version")) {
+      presetProfile.schema_version = presetProfile.export_schema_version;
+    }
+    _applyExportProfileToUi(presetProfile);
+
+    const hiddenToRestore = [];
+    for (const hp of requestedHidden) {
+      if (!hp || !idx.all.has(hp)) continue;
+      const actual = idx.actualByNorm?.get(hp) || hp;
+      hiddenToRestore.push(actual);
+    }
+    try {
+      await ipcRenderer.invoke("tree:clearIgnored");
+      for (const hp of hiddenToRestore) {
+        await ipcRenderer.invoke("tree:toggleIgnored", hp);
+      }
+      if (snapshot && typeof snapshot === "object") snapshot.ignored = hiddenToRestore.slice();
+    } catch (hiddenErr) {
+      if (__PM_UI_DEV__) console.error("[PRESET] hidden restore failed", hiddenErr);
+    }
+
+    if (token !== _exportPresetState.applyToken) return;
+
     if (!(_exportSelectionState.selected instanceof Set)) _exportSelectionState.selected = new Set();
     _exportSelectionState.selected.clear();
     for (const p0 of requestedSelection) {
@@ -2252,28 +2292,6 @@ async function _applyPresetV1(snapshot, presetObj) {
         }
       }
     }
-
-    const presetProfile = { ...(presetObj?.export?.profile || {}) };
-    if (!Object.prototype.hasOwnProperty.call(presetProfile, "schema_version") && Object.prototype.hasOwnProperty.call(presetProfile, "export_schema_version")) {
-      presetProfile.schema_version = presetProfile.export_schema_version;
-    }
-    _applyExportProfileToUi(presetProfile);
-
-    const hiddenToRestore = [];
-    for (const hp of requestedHidden) {
-      if (hp && idx.all.has(hp)) hiddenToRestore.push(hp);
-    }
-    try {
-      await ipcRenderer.invoke("tree:clearIgnored");
-      for (const hp of hiddenToRestore) {
-        await ipcRenderer.invoke("tree:toggleIgnored", hp);
-      }
-      if (snapshot && typeof snapshot === "object") snapshot.ignored = hiddenToRestore.slice();
-    } catch (hiddenErr) {
-      if (__PM_UI_DEV__) console.error("[PRESET] hidden restore failed", hiddenErr);
-    }
-
-    if (token !== _exportPresetState.applyToken) return;
 
     const mainChk = el("chkExportSelectedOnly");
     const tabChk = el("chkExportSelectedOnlyTab");

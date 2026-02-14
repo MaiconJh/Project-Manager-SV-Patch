@@ -1304,10 +1304,25 @@ function syncExpandedIdsFromPaths(tree){
     expanded.clear();
     const walk = (n)=>{
       if(!n) return;
-      if(n.isDir && expandedPaths.has(n.absPath)) expanded.add(n.id);
+      if(n.isDir && expandedPaths.has(_normalizeAbsPath(n.absPath))) expanded.add(n.id);
       if(n.children && n.children.length) n.children.forEach(walk);
     };
     walk(tree);
+  }catch{}
+}
+
+function _cleanupExpandedPathsFromTree(tree){
+  try{
+    const dirSet = new Set();
+    const walk = (n)=>{
+      if(!n) return;
+      if(n.isDir) dirSet.add(_normalizeAbsPath(n.absPath));
+      if(n.children && n.children.length) n.children.forEach(walk);
+    };
+    walk(tree);
+    for(const p of Array.from(expandedPaths)){
+      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
+    }
   }catch{}
 }
 
@@ -1610,8 +1625,14 @@ function _buildFileRow(r, snapshot) {
   row.querySelector("[data-caret]")?.addEventListener("click", (e) => {
     e.stopPropagation();
     if (!r.isDir) return;
-    if (expanded.has(r.id)) expanded.delete(r.id);
-    else expanded.add(r.id);
+    const folderPath = _normalizeAbsPath(r.absPath);
+    if (expanded.has(r.id)) {
+      expanded.delete(r.id);
+      expandedPaths.delete(folderPath);
+    } else {
+      expanded.add(r.id);
+      expandedPaths.add(folderPath);
+    }
     render(snapshot);
   });
 
@@ -1847,6 +1868,9 @@ try{
     _fileRowsSnapshot = null;
     return;
   }
+
+  _cleanupExpandedPathsFromTree(snapshot.tree);
+  syncExpandedIdsFromPaths(snapshot.tree);
 
   const rows = [];
   const searchMode = _fileSearchMode(filesSearchQuery);

@@ -1,3 +1,4 @@
+/* @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback. */
 /*
 PM-SV-PATCH META
 Version: pm-svpatch-ui@2026.02.11-r1
@@ -1621,6 +1622,32 @@ body.has-apply-diff .applyDiffModal{
   font-size:14px;
 }
 
+.panel.files .row.row-picked{
+  background:rgba(88,166,255,.10);
+}
+
+.panel.files .rowPick{
+  width:16px;
+  height:16px;
+  border:1px solid rgba(139,148,158,.65);
+  border-radius:4px;
+  background:rgba(13,17,23,.95);
+  cursor:pointer;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:0;
+}
+
+.panel.files .rowPick:checked{
+  accent-color:rgba(56,139,253,.95);
+}
+
+.panel.files .rowPick:disabled{
+  opacity:.5;
+  cursor:not-allowed;
+}
+
 .panel.files .actions{
   margin-left:auto;
   gap:4px;
@@ -1681,6 +1708,145 @@ body.has-apply-diff .applyDiffModal{
   border-radius:4px;
 }
 
+.exportSelRow{
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+}
+
+.exportSelToggleWrap{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  min-height:24px;
+}
+
+.exportSelLabel{
+  font-size:12px;
+  color:var(--text);
+}
+
+.exportSelSwitch{
+  position:relative;
+  display:inline-flex;
+  align-items:center;
+  cursor:pointer;
+  user-select:none;
+}
+
+.exportSelSwitch input{
+  position:absolute;
+  opacity:0;
+  width:1px;
+  height:1px;
+  pointer-events:none;
+}
+
+.exportSelSlider{
+  position:relative;
+  display:inline-block;
+  width:40px;
+  height:22px;
+  border-radius:999px;
+  background:rgba(110,118,129,.30);
+  border:1px solid rgba(110,118,129,.58);
+  transition:background-color .16s ease, border-color .16s ease;
+}
+
+.exportSelSlider::before{
+  content:"";
+  position:absolute;
+  width:16px;
+  height:16px;
+  left:2px;
+  top:2px;
+  border-radius:50%;
+  background:#e6edf3;
+  box-shadow:0 1px 2px rgba(0,0,0,.4);
+  transition:transform .16s ease;
+}
+
+.exportSelSwitch input:checked + .exportSelSlider{
+  background:rgba(56,139,253,.78);
+  border-color:rgba(56,139,253,.95);
+}
+
+.exportSelSwitch input:checked + .exportSelSlider::before{
+  transform:translateX(18px);
+}
+
+.exportSelSwitch input:focus-visible + .exportSelSlider{
+  box-shadow:0 0 0 2px rgba(56,139,253,.35);
+}
+
+.exportSelCount{
+  font-size:12px;
+}
+
+.exportSelActions{
+  gap:8px;
+  flex-wrap:wrap;
+}
+
+.exportLegacyCard{
+  opacity:.88;
+}
+
+.exportPanel .exportGroup{
+  margin-top:10px;
+  padding-top:8px;
+  border-top:1px solid rgba(240,246,252,.08);
+}
+
+.exportPanel .exportGroup:first-of-type{
+  margin-top:6px;
+}
+
+.exportGroupTitle{
+  font-size:12px;
+  color:var(--muted);
+  margin-bottom:6px;
+}
+
+.segCtl{
+  display:inline-flex;
+  border:1px solid rgba(240,246,252,.14);
+  border-radius:8px;
+  overflow:hidden;
+  background:rgba(0,0,0,.22);
+}
+
+.segBtn{
+  border:0;
+  border-right:1px solid rgba(240,246,252,.10);
+  background:transparent;
+  color:var(--muted);
+  font-size:12px;
+  padding:6px 10px;
+  cursor:pointer;
+}
+
+.segBtn:last-child{
+  border-right:0;
+}
+
+.segBtn.active{
+  background:rgba(56,139,253,.2);
+  color:var(--text);
+}
+
+.optChk{
+  display:block;
+  font-size:12px;
+  color:var(--text);
+  margin:4px 0;
+}
+
+.optChk input{
+  margin-right:6px;
+  accent-color:rgba(56,139,253,.95);
+}
+
 /* =========================================================
    File Viewer editor UX add-ons: line numbers + find bar
    (visual + local editor chrome only)
@@ -1689,6 +1855,7 @@ body.has-apply-diff .applyDiffModal{
   position:relative;
   height:100%;
   display:none;
+  pointer-events:auto;
 }
 
 .fvEditMain{
@@ -1699,8 +1866,8 @@ body.has-apply-diff .applyDiffModal{
 }
 
 .fvGutter{
-  width:52px;
-  flex:0 0 52px;
+  width:64px;
+  flex:0 0 64px;
   border-right:1px solid rgba(240,246,252,.10);
   background:rgba(0,0,0,.16);
   color:var(--muted);
@@ -1716,6 +1883,7 @@ body.has-apply-diff .applyDiffModal{
   font-size:12.5px;
   line-height:1.45;
   white-space:pre;
+  font-variant-numeric:tabular-nums;
 }
 
 .fvEditWrap .fvEditor{
@@ -1727,8 +1895,9 @@ body.has-apply-diff .applyDiffModal{
 .fvFindBar{
   position:absolute;
   top:8px;
-  right:10px;
-  z-index:2;
+  left:50%;
+  transform:translateX(-50%);
+  z-index:6;
   display:flex;
   align-items:center;
   gap:6px;
@@ -1737,6 +1906,8 @@ body.has-apply-diff .applyDiffModal{
   border-radius:8px;
   background:rgba(13,17,23,.94);
   box-shadow:0 8px 20px rgba(0,0,0,.35);
+  pointer-events:auto;
+  max-width:calc(100% - 28px);
 }
 
 .fvFindInput{
@@ -1750,6 +1921,23 @@ body.has-apply-diff .applyDiffModal{
   font-family:var(--font);
   padding:0 8px;
   outline:none;
+}
+
+.fvReplaceInput{
+  width:170px;
+}
+
+.fvFindOpt{
+  display:inline-flex;
+  align-items:center;
+  gap:4px;
+  color:var(--muted);
+  font-size:11px;
+  user-select:none;
+}
+
+.fvFindOpt input{
+  accent-color:rgba(56,139,253,.95);
 }
 
 .fvFindInput:focus{
@@ -1774,10 +1962,11 @@ body.has-apply-diff .applyDiffModal{
 }
 
 .fvFindStatus{
-  min-width:56px;
+  min-width:64px;
   color:var(--muted);
   font-size:11px;
   text-align:right;
+  font-variant-numeric:tabular-nums;
 }
 
 /* keep text visible while find bar overlays top-right */
@@ -1793,7 +1982,7 @@ body.has-apply-diff .applyDiffModal{
    ========================================================= */
 .fvCodeWithLines{
   display:grid;
-  grid-template-columns:52px minmax(0,1fr);
+  grid-template-columns:64px minmax(0,1fr);
   align-items:start;
   min-width:100%;
 }
@@ -1810,6 +1999,7 @@ body.has-apply-diff .applyDiffModal{
   font-size:12.5px;
   line-height:1.45;
   white-space:pre;
+  font-variant-numeric:tabular-nums;
 }
 
 .fvCodeWithLines .fvCode{
@@ -1822,8 +2012,8 @@ body.has-apply-diff .applyDiffModal{
   display:none !important;
 }
 
-.fvCard[data-find-open="0"] .fvFindBar{
-  pointer-events:none;
+.fvCard[data-find-open="1"] .fvFindBar{
+  pointer-events:auto;
 }
 
 /* IDE-like find overlay inside textarea stack (non-destructive) */
@@ -1872,3 +2062,111 @@ body.has-apply-diff .applyDiffModal{
 .findMatchActive{
   background:rgba(56,139,253,.42);
 }
+
+.fvStatusBar{
+  display:flex;
+  gap:12px;
+  align-items:center;
+  min-height:26px;
+  padding:4px 10px;
+  border-top:1px solid rgba(240,246,252,.10);
+  background:rgba(0,0,0,.20);
+  color:var(--muted);
+  font-size:11px;
+  font-family:var(--mono);
+}
+
+/* Export presets quick controls (Files header) */
+.presetQuick{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  flex-wrap:wrap;
+  position:relative;
+}
+.presetMenuBtn{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  white-space:nowrap;
+  padding:4px 10px;
+}
+.uiIcon{
+  width:16px;
+  height:16px;
+  flex:0 0 auto;
+  color:currentColor;
+}
+.uiIconChevron{ width:14px; height:14px; opacity:.8; }
+.presetMenu{
+  position:absolute;
+  top:calc(100% + 6px);
+  left:0;
+  min-width:178px;
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:rgba(13,17,23,.98);
+  box-shadow:0 8px 24px rgba(0,0,0,.35);
+  padding:4px;
+  z-index:35;
+}
+.presetMenuItem{
+  width:100%;
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding:7px 8px;
+  border:0;
+  border-radius:6px;
+  color:var(--text);
+  background:transparent;
+  cursor:pointer;
+  text-align:left;
+  white-space:nowrap;
+}
+.presetMenuItem:hover,
+.presetMenuItem:focus-visible{
+  outline:none;
+  background:rgba(56,139,253,.16);
+}
+.presetLegacyBtn{ display:none !important; }
+.presetLabel{
+  font-size:11px;
+  color:var(--muted);
+}
+.presetSelect{
+  min-width:130px;
+  max-width:220px;
+  height:26px;
+  border:1px solid var(--border);
+  border-radius:7px;
+  background:rgba(13,17,23,.72);
+  color:var(--text);
+  font-size:12px;
+  padding:0 6px;
+}
+.btn.tiny{
+  padding:4px 8px;
+  font-size:11px;
+}
+.presetAutoWrap{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  margin-left:2px;
+}
+.presetAutoLabel{
+  font-size:11px;
+  color:var(--muted);
+}
+.presetFeedback{
+  margin-top:6px;
+  font-size:11px;
+}
+.presetFeedback.ok{ color:var(--ok); }
+.presetFeedback.partial{ color:var(--warn); }
+.presetFeedback.broken{ color:var(--bad); }
+.presetFeedback.loading{ color:var(--muted); }
+
+.presetFeedback.error{ color:var(--danger); }
+.presetFeedback.cancel{ color:var(--muted); }

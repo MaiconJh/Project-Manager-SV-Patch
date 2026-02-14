@@ -1699,8 +1699,8 @@ body.has-apply-diff .applyDiffModal{
 }
 
 .fvGutter{
-  width:52px;
-  flex:0 0 52px;
+  width:64px;
+  flex:0 0 64px;
   border-right:1px solid rgba(240,246,252,.10);
   background:rgba(0,0,0,.16);
   color:var(--muted);
@@ -1716,6 +1716,7 @@ body.has-apply-diff .applyDiffModal{
   font-size:12.5px;
   line-height:1.45;
   white-space:pre;
+  font-variant-numeric:tabular-nums;
 }
 
 .fvEditWrap .fvEditor{
@@ -1752,6 +1753,23 @@ body.has-apply-diff .applyDiffModal{
   outline:none;
 }
 
+.fvReplaceInput{
+  width:170px;
+}
+
+.fvFindOpt{
+  display:inline-flex;
+  align-items:center;
+  gap:4px;
+  color:var(--muted);
+  font-size:11px;
+  user-select:none;
+}
+
+.fvFindOpt input{
+  accent-color:rgba(56,139,253,.95);
+}
+
 .fvFindInput:focus{
   border-color:rgba(56,139,253,.65);
   box-shadow:0 0 0 1px rgba(56,139,253,.32);
@@ -1774,10 +1792,11 @@ body.has-apply-diff .applyDiffModal{
 }
 
 .fvFindStatus{
-  min-width:56px;
+  min-width:64px;
   color:var(--muted);
   font-size:11px;
   text-align:right;
+  font-variant-numeric:tabular-nums;
 }
 
 /* keep text visible while find bar overlays top-right */
@@ -1793,7 +1812,7 @@ body.has-apply-diff .applyDiffModal{
    ========================================================= */
 .fvCodeWithLines{
   display:grid;
-  grid-template-columns:52px minmax(0,1fr);
+  grid-template-columns:64px minmax(0,1fr);
   align-items:start;
   min-width:100%;
 }
@@ -1810,6 +1829,7 @@ body.has-apply-diff .applyDiffModal{
   font-size:12.5px;
   line-height:1.45;
   white-space:pre;
+  font-variant-numeric:tabular-nums;
 }
 
 .fvCodeWithLines .fvCode{
@@ -1871,4 +1891,17 @@ body.has-apply-diff .applyDiffModal{
 
 .findMatchActive{
   background:rgba(56,139,253,.42);
+}
+
+.fvStatusBar{
+  display:flex;
+  gap:12px;
+  align-items:center;
+  min-height:26px;
+  padding:4px 10px;
+  border-top:1px solid rgba(240,246,252,.10);
+  background:rgba(0,0,0,.20);
+  color:var(--muted);
+  font-size:11px;
+  font-family:var(--mono);
 }

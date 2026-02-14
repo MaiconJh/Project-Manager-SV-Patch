@@ -437,6 +437,9 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   let _findMatches = [];
   let _findIndex = -1;
   let _findDebounceTimer = null;
+  let _findBuildToken = 0;
+  let _lineEnding = /\r\n/.test(current) ? "CRLF" : "LF";
+  const _encoding = "UTF-8";
 
   const isMd = isMarkdownExt(ext);
 
@@ -485,6 +488,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     editWrap.classList.add("find-open");
     findInput.focus();
     findInput.select();
+    _syncFindStatus(cardEl);
   }
 
   function closeFindBar(cardEl, focusEditor = false) {
@@ -495,6 +499,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     const overlay = cardEl?.querySelector("[data-find-overlay]");
     const overlayContent = cardEl?.querySelector("[data-find-overlay-content]");
     if (_findDebounceTimer) clearTimeout(_findDebounceTimer);
+    _findBuildToken += 1;
     _findOpen = false;
     _findMatches = [];
     _findIndex = -1;
@@ -531,10 +536,23 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     }
     const total = _findMatches.length;
     if (!total) {
-      status.textContent = "0 of 0";
+      status.textContent = "0 / 0";
       return;
     }
-    status.textContent = `${_findIndex + 1} of ${total}`;
+    status.textContent = `${_findIndex + 1} / ${total}`;
+  }
+
+  function _getFindOptions(cardEl) {
+    const matchCase = Boolean(cardEl?.querySelector("[data-find-case]")?.checked);
+    const wholeWord = Boolean(cardEl?.querySelector("[data-find-word]")?.checked);
+    return { matchCase, wholeWord };
+  }
+
+  function _buildFindRegex(needleRaw, opts) {
+    if (!needleRaw) return null;
+    const src = opts.wholeWord ? `\\b${_escapeRegExp(needleRaw)}\\b` : _escapeRegExp(needleRaw);
+    const flags = opts.matchCase ? "g" : "gi";
+    return new RegExp(src, flags);
   }
 
   function _scrollFindOverlayWithEditor(cardEl) {
@@ -545,7 +563,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     overlay.scrollLeft = editor.scrollLeft;
   }
 
-  function _rebuildFindMatches(cardEl) {
+  function _rebuildFindMatches(cardEl, tokenHint = _findBuildToken) {
     const editor = cardEl?.querySelector("[data-editor]");
     const findInput = cardEl?.querySelector("[data-find-input]");
     const overlay = cardEl?.querySelector("[data-find-overlay]");
@@ -554,7 +572,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
 
     const text = String(editor.value || "");
     const needleRaw = String(findInput.value || "");
-    const needle = needleRaw.toLowerCase();
+    const opts = _getFindOptions(cardEl);
 
     _findMatches = [];
     _findIndex = -1;
@@ -566,13 +584,21 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       return;
     }
 
-    let idx = 0;
-    const hay = text.toLowerCase();
-    while (idx <= hay.length) {
-      const pos = hay.indexOf(needle, idx);
-      if (pos === -1) break;
-      _findMatches.push({ start: pos, end: pos + needleRaw.length });
-      idx = pos + Math.max(1, needleRaw.length);
+    const re = _buildFindRegex(needleRaw, opts);
+    if (!re) {
+      overlay.hidden = true;
+      overlayContent.innerHTML = "";
+      _syncFindStatus(cardEl);
+      return;
+    }
+
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      if (tokenHint !== _findBuildToken) return;
+      const start = m.index;
+      const len = Math.max(1, String(m[0] || "").length);
+      _findMatches.push({ start, end: start + len });
+      if (len === 0) re.lastIndex += 1;
     }
 
     if (!_findMatches.length) {
@@ -585,12 +611,13 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     _findIndex = 0;
     overlay.hidden = false;
 
-    const re = new RegExp(_escapeRegExp(needleRaw), "gi");
+    const markRe = _buildFindRegex(needleRaw, opts);
+    if (!markRe) return;
     let activeCount = -1;
-    overlayContent.innerHTML = _escapeHtmlLite(text).replace(re, (m) => {
+    overlayContent.innerHTML = _escapeHtmlLite(text).replace(markRe, (m0) => {
       activeCount += 1;
       const activeCls = activeCount === _findIndex ? " findMatchActive" : "";
-      return `<mark class="findMatch${activeCls}">${_escapeHtmlLite(m)}</mark>`;
+      return `<mark class="findMatch${activeCls}">${_escapeHtmlLite(m0)}</mark>`;
     });
 
     const m0 = _findMatches[0];
@@ -602,7 +629,73 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
 
   function _scheduleFindRebuild(cardEl) {
     if (_findDebounceTimer) clearTimeout(_findDebounceTimer);
-    _findDebounceTimer = setTimeout(() => _rebuildFindMatches(cardEl), 140);
+    const token = ++_findBuildToken;
+    _findDebounceTimer = setTimeout(() => _rebuildFindMatches(cardEl, token), 140);
+  }
+
+  function _replaceCurrentFind(cardEl) {
+    if (!_findOpen || !_findMatches.length) return false;
+    const editor = cardEl?.querySelector("[data-editor]");
+    const replaceInput = cardEl?.querySelector("[data-replace-input]");
+    if (!editor || !replaceInput) return false;
+    const m = _findMatches[Math.max(0, _findIndex)];
+    if (!m) return false;
+    const left = String(editor.value || "").slice(0, m.start);
+    const right = String(editor.value || "").slice(m.end);
+    const replacement = String(replaceInput.value || "");
+    editor.value = left + replacement + right;
+    current = String(editor.value || "");
+    const caret = left.length + replacement.length;
+    editor.focus();
+    editor.setSelectionRange(caret, caret);
+    scheduleLineNumbersRefresh(editor, cardEl?.querySelector("[data-lines]"));
+    _scheduleFindRebuild(cardEl);
+    _updateEditorStatus(cardEl);
+    return true;
+  }
+
+  function _replaceAllFind(cardEl) {
+    if (!_findOpen) return 0;
+    const editor = cardEl?.querySelector("[data-editor]");
+    const findInput = cardEl?.querySelector("[data-find-input]");
+    const replaceInput = cardEl?.querySelector("[data-replace-input]");
+    if (!editor || !findInput || !replaceInput) return 0;
+    const needleRaw = String(findInput.value || "");
+    if (!needleRaw) return 0;
+    const re = _buildFindRegex(needleRaw, _getFindOptions(cardEl));
+    if (!re) return 0;
+    let count = 0;
+    const replacement = String(replaceInput.value || "");
+    editor.value = String(editor.value || "").replace(re, () => {
+      count += 1;
+      return replacement;
+    });
+    current = String(editor.value || "");
+    scheduleLineNumbersRefresh(editor, cardEl?.querySelector("[data-lines]"));
+    _scheduleFindRebuild(cardEl);
+    _updateEditorStatus(cardEl);
+    return count;
+  }
+
+  function _updateEditorStatus(cardEl) {
+    const editor = cardEl?.querySelector("[data-editor]");
+    if (!editor) return;
+    const text = String(editor.value || "");
+    const pos = Number.isFinite(editor.selectionStart) ? editor.selectionStart : 0;
+    const upto = text.slice(0, pos);
+    const line = upto.split(/\n/).length;
+    const col = pos - upto.lastIndexOf("\n");
+    _lineEnding = /\r\n/.test(text) ? "CRLF" : "LF";
+    const modeEl = cardEl?.querySelector("[data-status-mode]");
+    const posEl = cardEl?.querySelector("[data-status-pos]");
+    const sizeEl = cardEl?.querySelector("[data-status-size]");
+    const eolEl = cardEl?.querySelector("[data-status-eol]");
+    const encEl = cardEl?.querySelector("[data-status-enc]");
+    if (modeEl) modeEl.textContent = editing ? "Edit" : "View";
+    if (posEl) posEl.textContent = `Ln ${line}, Col ${Math.max(1, col)}`;
+    if (sizeEl) sizeEl.textContent = fmtBytes(text.length);
+    if (eolEl) eolEl.textContent = _lineEnding;
+    if (encEl) encEl.textContent = _encoding;
   }
 
   function _selectFindMatchByIndex(cardEl, nextIndex) {
@@ -691,12 +784,14 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       const gutter = card.querySelector("[data-gutter]");
       updateLineNumbers(editor, gutterPre);
       syncEditorGutterScroll(editor, gutter);
+      _updateEditorStatus(card);
     }
     if (viewer) viewer.style.display = editing ? "none" : "";
     if (btnEdit) btnEdit.classList.toggle("active", editing);
     if (btnSave) btnSave.style.display = editing ? "" : "none";
     if (btnCancel) btnCancel.style.display = editing ? "" : "none";
     if (btnRaw) btnRaw.style.display = !editing ? "" : "none";
+    _updateEditorStatus(card);
   }
 
   card.innerHTML = `
@@ -759,8 +854,13 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       <div class="fvEditWrap" data-edit-wrap="1" style="display:none">
         <div class="fvFindBar" data-findbar="1" hidden>
           <input type="text" class="fvFindInput" data-find-input="1" placeholder="Find" aria-label="Find in editor" />
+          <input type="text" class="fvFindInput fvReplaceInput" data-replace-input="1" placeholder="Replace" aria-label="Replace in editor" />
+          <label class="fvFindOpt"><input type="checkbox" data-find-case="1" /> Aa</label>
+          <label class="fvFindOpt"><input type="checkbox" data-find-word="1" /> W</label>
           <button class="fvFindBtn" type="button" data-find-prev="1">Prev</button>
           <button class="fvFindBtn" type="button" data-find-next="1">Next</button>
+          <button class="fvFindBtn" type="button" data-replace-next="1">Replace</button>
+          <button class="fvFindBtn" type="button" data-replace-all="1">Replace All</button>
           <button class="fvFindBtn" type="button" data-find-close="1" aria-label="Close find">×</button>
           <span class="fvFindStatus" data-find-status="1"></span>
         </div>
@@ -770,6 +870,13 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
             <pre class="fvFindOverlay" data-find-overlay="1" hidden><code data-find-overlay-content="1"></code></pre>
             <textarea class="fvEditor" data-editor="1" spellcheck="false" style="display:none"></textarea>
           </div>
+        </div>
+        <div class="fvStatusBar" data-statusbar="1">
+          <span data-status-mode="1">View</span>
+          <span data-status-pos="1">Ln 1, Col 1</span>
+          <span data-status-size="1">${escapeHtml(fmtBytes(sizeBytes))}</span>
+          <span data-status-eol="1">${escapeHtml(_lineEnding)}</span>
+          <span data-status-enc="1">${escapeHtml(_encoding)}</span>
         </div>
       </div>
     </div>
@@ -931,6 +1038,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     const editorEl = card.querySelector("[data-editor]");
     const gutterPre = card.querySelector("[data-lines]");
     scheduleLineNumbersRefresh(editorEl, gutterPre);
+    _updateEditorStatus(card);
     if (_findOpen) _scheduleFindRebuild(card);
   });
 
@@ -956,6 +1064,9 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       }
     }
   });
+
+  card.querySelector("[data-editor]")?.addEventListener("click", () => _updateEditorStatus(card));
+  card.querySelector("[data-editor]")?.addEventListener("keyup", () => _updateEditorStatus(card));
 
   card.querySelector("[data-find-close]")?.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -985,6 +1096,27 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   });
 
   card.querySelector("[data-find-input]")?.addEventListener("input", () => {
+    if (!_findOpen) return;
+    _scheduleFindRebuild(card);
+  });
+
+  card.querySelector("[data-replace-next]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    _replaceCurrentFind(card);
+  });
+
+  card.querySelector("[data-replace-all]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const total = _replaceAllFind(card);
+    if (total > 0) addLog(`[FILE_EDIT] Replaced ${total} match(es) in ${relPath || absPath}`);
+  });
+
+  card.querySelector("[data-find-case]")?.addEventListener("change", () => {
+    if (!_findOpen) return;
+    _scheduleFindRebuild(card);
+  });
+
+  card.querySelector("[data-find-word]")?.addEventListener("change", () => {
     if (!_findOpen) return;
     _scheduleFindRebuild(card);
   });

@@ -7,14 +7,6 @@ const { spawn } = require("child_process");
 const { COLORS, nowTime, formatCount } = require("./config");
 const core = require("./core");
 
-/*
-PM-SV-PATCH META
-Version: pm-svpatch-main@2026.02.11-r2
-Last-Edited: 2026-02-11
-Contains: Electron main process (project scan/index, file read/write, patch runner integration).
-Implemented in this version: (1) Auto-refresh watcher: fs.watch (recursive) + polling fallback; emits 'watcher:changed' to renderer (debounced, disabled during Patch).
-*/
-
 let win = null;
 let patchProc = null;
 

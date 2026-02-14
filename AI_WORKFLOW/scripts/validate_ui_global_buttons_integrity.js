@@ -44,7 +44,7 @@ for (const pat of directClickPatterns) {
   if (pat.test(ui)) fail(`forbidden direct click binding found: ${pat}`);
 }
 
-if (!ui.includes('console.info(`[UI] bind complete:')) fail('bind health info log missing');
+if (!ui.includes('console.info("[UI] bind complete:",')) fail('bind health info log missing');
 if (!ui.includes('console.error("[UI] Missing element:", id)')) fail('missing-element error log missing');
 if (!ui.includes('console.error("[UI] Handler failed:", id, e)')) fail('handler-failed error log missing');
 if (!ui.includes('window.addEventListener("error"')) fail('window error trap missing');

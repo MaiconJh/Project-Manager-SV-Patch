@@ -258,7 +258,7 @@ const DEFAULT_EXPORT_PROFILE = {
   profile_id: "default",
   format: "txt",
   scope: "all",
-  content_level: "standard",
+  content_level: "full",
   include_tree: true,
   include_hashes: false,
   include_ignored_summary: true,
@@ -271,7 +271,9 @@ function _normalizeExportProfile(profile) {
   p.profile_id = String(p.profile_id || "default");
   p.format = p.format === "json" ? "json" : "txt";
   p.scope = p.scope === "selected" ? "selected" : "all";
-  p.content_level = ["compact", "standard", "full"].includes(p.content_level) ? p.content_level : "standard";
+  // normalize to canonical levels only: compact | full
+  const cl = String(p.content_level || "").toLowerCase();
+  p.content_level = cl === "compact" ? "compact" : "full";
   p.include_tree = Boolean(p.include_tree);
   p.include_hashes = Boolean(p.include_hashes);
   p.include_ignored_summary = Boolean(p.include_ignored_summary);

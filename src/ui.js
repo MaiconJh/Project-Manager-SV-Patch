@@ -29,7 +29,7 @@ const _exportSelectionState = {
 const _exportSelectionFile = ".pm_sv_export_selection.json";
 const _exportUi = {
   type: "txt", // txt | json
-  contentLevel: "standard", // compact | standard | full
+  contentLevel: "standard", // compact | standard | full (standard/full map to profile full)
   options: {
     treeHeader: true,
     ignoredSummary: true,
@@ -1574,7 +1574,7 @@ function _buildExportProfile() {
     profile_id: "default",
     format: _exportUi.type === "json" ? "json" : "txt",
     scope: _exportSelectionState.selectedMode === "selected" ? "selected" : "all",
-    content_level: ["compact", "standard", "full"].includes(_exportUi.contentLevel) ? _exportUi.contentLevel : "standard",
+    content_level: _exportUi.contentLevel === "compact" ? "compact" : "full",
     include_tree: Boolean(_exportUi.options.treeHeader),
     include_hashes: Boolean(_exportUi.options.hashes),
     include_ignored_summary: Boolean(_exportUi.options.ignoredSummary),
@@ -1663,7 +1663,7 @@ function _updateExportLiveSummary(snapshot) {
   const resolved = profile.scope === "selected"
     ? _collectExportableFromSelection(snapshot || lastSnapshot || {}).size
     : _countExportableAll(snapshot || lastSnapshot || {});
-  const avgBytes = profile.content_level === "compact" ? 120 : profile.content_level === "full" ? 850 : 380;
+  const avgBytes = profile.content_level === "compact" ? 120 : 850;
   const estKb = Math.max(1, Math.round(((resolved || (snapshot?.stats?.files || 0)) * avgBytes) / 1024));
   elSum.textContent = `Mode: ${mode} · Selected: ${selected} · Resolved files: ${resolved} · Format: ${String(profile.format || "txt").toUpperCase()} · Tree: ${profile.include_tree ? "yes" : "no"} · Estimated size: ~${estKb} KB`;
 }

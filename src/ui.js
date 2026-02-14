@@ -118,6 +118,7 @@ function _scheduleAutoRefresh(reason) {
 
     try {
       b?.classList?.add("busy");
+      _markPresetRefreshCycle();
       showToast("Auto-refresh: changes detected…", { type: "info", ttl: 1400 });
       await ipcRenderer.invoke("project:refresh");
       showToast("Auto-refresh: files updated.", { type: "success", ttl: 1600 });
@@ -1360,6 +1361,9 @@ function syncExpandedIdsFromPaths(tree){
       if(n.children && n.children.length) n.children.forEach(walk);
     };
     walk(tree);
+    for(const p of Array.from(expandedPaths)){
+      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
+    }
   }catch{}
 }
 
@@ -3332,6 +3336,7 @@ function bind() {
     _exportSelectionState.selectedMode = prof.scope === "selected" ? "selected" : "all";
   }catch{}
   setTabs();
+  _refreshPresetControlsUi();
   _bindFileListVirtualEvents();
 
   const filesSearchInput = el("filesSearchInput");
@@ -3371,6 +3376,7 @@ function bind() {
 
     try {
       b?.classList?.add("busy");
+      _markPresetRefreshCycle();
       showToast("Refreshing files…", { type: "info", ttl: 1600 });
 
       const res = await ipcRenderer.invoke("project:refresh");
@@ -3663,6 +3669,7 @@ function bind() {
 // IPC events
 ipcRenderer.on("state:update", (_, snapshot) => {
   render(snapshot);
+  _maybeAutoApplyPreset(snapshot);
 });
 
 ipcRenderer.on("log:append", (_, line) => {
@@ -3703,6 +3710,7 @@ if (__PM_UI_TRACE_CLICKS__) {
 
 // bootstrap
 bind();
+_markPresetRefreshCycle();
 ipcRenderer.invoke("ui:refresh");
 
 

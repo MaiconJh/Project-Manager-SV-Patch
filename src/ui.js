@@ -1,3 +1,4 @@
+// @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback ui-diagnostics preset-ui-fix safe-bind.
 /*
 PM-SV-PATCH META
 Version: pm-svpatch-ui@2026.02.11-r1
@@ -6,7 +7,94 @@ Contains: UI shell, file tree, file view cards (view/edit/markdown/raw/fullscree
 Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2) Refresh button alignment/feedback CSS (no logic changes).
 */
 const { ipcRenderer } = require("electron");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const { TextDecoder } = require("util");
+const { DEFAULT_IGNORE_EXTS } = require("./config");
 const el = (id) => document.getElementById(id);
+
+const __PM_UI_DEV__ = !process?.env || process.env.NODE_ENV !== "production";
+const __PM_UI_TRACE_CLICKS__ = __PM_UI_DEV__ && process?.env?.PM_UI_TRACE_CLICKS === "1";
+const __UI_BIND_EXPECTED_BUTTON_IDS__ = [
+  "btnOpen",
+  "btnRefreshFiles",
+  "btnHelp",
+  "btnClearIgnored",
+  "btnExportPrimary",
+  "btnCopyLogs",
+  "btnClearLogs",
+  "btnPickRunner",
+  "btnBuildManifest",
+  "btnSavePipeline",
+  "btnRunPlan",
+  "btnRunApply",
+  "btnStopPatch",
+  "btnPresetSaveFile",
+  "btnPresetImportFile",
+];
+const __UI_BIND_METRICS__ = {
+  expected: new Set(__UI_BIND_EXPECTED_BUTTON_IDS__),
+  wired: new Set(),
+  missingDom: new Set(),
+  missingHandler: new Set(),
+};
+function _uiDevLog(msg, err) {
+  try { if (typeof addLog === "function") addLog(`[UI] ${msg}${err ? ` :: ${err?.message || err}` : ""}`); } catch {}
+  try { if (err) console.error(`[UI] ${msg}`, err); else console.warn(`[UI] ${msg}`); } catch {}
+}
+function _reportUiBindingIssue(message) {
+  try { console.error(`[UI] ${message}`); } catch {}
+  try { showToast(message, { type: "error", ttl: 2400 }); } catch {}
+}
+function _bindClickSafe(id, handler, opts = {}) {
+  const node = el(id);
+  if (!node) {
+    if (opts.required !== false) {
+      __UI_BIND_METRICS__.missingDom.add(id);
+      _reportUiBindingIssue(`Missing UI element: #${id}`);
+    }
+    return;
+  }
+  if (typeof handler !== "function") {
+    __UI_BIND_METRICS__.missingHandler.add(id);
+    _reportUiBindingIssue(`Missing click handler: #${id}`);
+    return;
+  }
+  __UI_BIND_METRICS__.wired.add(id);
+  node.addEventListener("click", async (ev) => {
+    try {
+      await handler(ev);
+    } catch (e) {
+      _reportUiBindingIssue(`Action failed (${id})`);
+      _uiDevLog(`click handler failed: #${id}`, e);
+      showToast(`Action failed (${id})`, { type: "error", ttl: 2600 });
+    }
+  });
+}
+
+function _reportUiBindHealth() {
+  if (!__PM_UI_DEV__) return;
+  try {
+    const expected = __UI_BIND_METRICS__.expected;
+    for (const id of expected) {
+      if (!__UI_BIND_METRICS__.wired.has(id) && !__UI_BIND_METRICS__.missingDom.has(id)) {
+        __UI_BIND_METRICS__.missingHandler.add(id);
+      }
+    }
+    const wiredCount = __UI_BIND_METRICS__.wired.size;
+    const missingCount = __UI_BIND_METRICS__.missingDom.size + __UI_BIND_METRICS__.missingHandler.size;
+    console.log(`[UI] bind complete: ${wiredCount} buttons wired, ${missingCount} missing`);
+    if (__UI_BIND_METRICS__.missingDom.size) {
+      console.error(`[UI] bind missing DOM IDs: ${Array.from(__UI_BIND_METRICS__.missingDom).join(", ")}`);
+    }
+    if (__UI_BIND_METRICS__.missingHandler.size) {
+      console.error(`[UI] bind missing handlers: ${Array.from(__UI_BIND_METRICS__.missingHandler).join(", ")}`);
+    }
+  } catch (e) {
+    _uiDevLog("bind health report failed", e);
+  }
+}
 
 const expanded = new Set();
 const expandedPaths = new Set(); // absPath set to preserve expanded state across refreshes
@@ -18,6 +106,40 @@ let filesSearchDebounceTimer = null;
 let currentPipelinePath = null;
 let lastSnapshot = null;
 let _applyDiffPreviewNonce = 0;
+const _exportSelectionState = {
+  selected: new Set(),
+  selectedMode: "all", // all | selected
+};
+const _exportSelectionFile = ".pm_sv_export_selection.json";
+const _exportSizeState = {
+  status: "idle", // idle | loading | ready | error
+  bytes: null,
+  lastStableBytes: null,
+  key: "",
+  token: 0,
+  debounceTimer: null,
+  cache: new Map(),
+};
+const _exportUi = {
+  type: "txt", // txt | json
+  contentLevel: "standard", // compact | standard | full (standard/full map to profile full)
+  options: {
+    treeHeader: true,
+    ignoredSummary: true,
+    hashes: false,
+    sortDet: true,
+  },
+};
+const _exportPresetState = {
+  applying: false,
+  applyToken: 0,
+  lastPresetPath: "",
+  lastHealth: "none", // none | ok | partial | broken
+  feedbackTimer: null,
+};
+
+const _stateUpdateWaiters = [];
+
 
 const _applyDiffState = {
   open: false,
@@ -437,6 +559,19 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   let _findMatches = [];
   let _findIndex = -1;
   let _findDebounceTimer = null;
+  let _findBuildToken = 0;
+  let _findOverlayCacheKey = "";
+  let _findTypingTimer = null;
+  const _findState = {
+    isOpen: false,
+    matches: [],
+    activeIndex: -1,
+    total: 0,
+    buildToken: 0,
+    lastQuery: "",
+  };
+  let _lineEnding = /\r\n/.test(current) ? "CRLF" : "LF";
+  const _encoding = "UTF-8";
 
   const isMd = isMarkdownExt(ext);
 
@@ -480,11 +615,13 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     const editWrap = cardEl?.querySelector("[data-edit-wrap]");
     if (!findBar || !findInput || !editWrap || !editing) return;
     _findOpen = true;
+    _findState.isOpen = true;
     cardEl.dataset.findOpen = "1";
     findBar.hidden = false;
     editWrap.classList.add("find-open");
     findInput.focus();
     findInput.select();
+    _syncFindStatus(cardEl);
   }
 
   function closeFindBar(cardEl, focusEditor = false) {
@@ -495,9 +632,18 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     const overlay = cardEl?.querySelector("[data-find-overlay]");
     const overlayContent = cardEl?.querySelector("[data-find-overlay-content]");
     if (_findDebounceTimer) clearTimeout(_findDebounceTimer);
+    if (_findTypingTimer) clearTimeout(_findTypingTimer);
+    _findBuildToken += 1;
+    _findState.buildToken = _findBuildToken;
     _findOpen = false;
+    _findState.isOpen = false;
     _findMatches = [];
+    _findState.matches = [];
     _findIndex = -1;
+    _findState.activeIndex = -1;
+    _findState.total = 0;
+    _findState.lastQuery = "";
+    _findOverlayCacheKey = "";
     if (cardEl) cardEl.dataset.findOpen = "0";
     if (findBar) findBar.hidden = true;
     if (editWrap) editWrap.classList.remove("find-open");
@@ -507,7 +653,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       overlay.scrollLeft = 0;
     }
     if (overlayContent) overlayContent.innerHTML = "";
-    if (findStatus) findStatus.textContent = "";
+    if (findStatus) findStatus.textContent = "0 / 0";
     if (focusEditor && editor) editor.focus();
   }
 
@@ -525,16 +671,29 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   function _syncFindStatus(cardEl) {
     const status = cardEl?.querySelector("[data-find-status]");
     if (!status) return;
-    if (!_findOpen) {
-      status.textContent = "";
+    if (!_findState.isOpen) {
+      status.textContent = "0 / 0";
       return;
     }
-    const total = _findMatches.length;
+    const total = _findState.total;
     if (!total) {
-      status.textContent = "0 of 0";
+      status.textContent = "0 / 0";
       return;
     }
-    status.textContent = `${_findIndex + 1} of ${total}`;
+    status.textContent = `${_findState.activeIndex + 1} / ${total}`;
+  }
+
+  function _getFindOptions(cardEl) {
+    const matchCase = Boolean(cardEl?.querySelector("[data-find-case]")?.checked);
+    const wholeWord = Boolean(cardEl?.querySelector("[data-find-word]")?.checked);
+    return { matchCase, wholeWord };
+  }
+
+  function _buildFindRegex(needleRaw, opts) {
+    if (!needleRaw) return null;
+    const src = opts.wholeWord ? `\\b${_escapeRegExp(needleRaw)}\\b` : _escapeRegExp(needleRaw);
+    const flags = opts.matchCase ? "g" : "gi";
+    return new RegExp(src, flags);
   }
 
   function _scrollFindOverlayWithEditor(cardEl) {
@@ -545,7 +704,74 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     overlay.scrollLeft = editor.scrollLeft;
   }
 
-  function _rebuildFindMatches(cardEl) {
+  function _findBarHasFocus(cardEl) {
+    const findBar = cardEl?.querySelector("[data-findbar]");
+    const ae = document.activeElement;
+    return Boolean(findBar && ae && findBar.contains(ae));
+  }
+
+  function _scrollEditorToMatch(cardEl, match) {
+    const editor = cardEl?.querySelector("[data-editor]");
+    if (!editor || !match) return;
+    const txt = String(editor.value || "").slice(0, Math.max(0, match.start));
+    const lineIndex = txt.split("\n").length - 1;
+    const cs = window.getComputedStyle(editor);
+    const lineHeight = Number.parseFloat(cs.lineHeight) || 18;
+    const padTop = Number.parseFloat(cs.paddingTop) || 0;
+    const targetTop = padTop + (lineIndex * lineHeight);
+    const nextTop = clamp(
+      Math.round(targetTop - (editor.clientHeight / 2) + (lineHeight / 2)),
+      0,
+      Math.max(0, editor.scrollHeight - editor.clientHeight)
+    );
+    if (Math.abs((editor.scrollTop || 0) - nextTop) > 1) editor.scrollTop = nextTop;
+    _scrollFindOverlayWithEditor(cardEl);
+  }
+
+  function _computeFindMatches(text, needleRaw, opts, tokenHint) {
+    const out = [];
+    if (!needleRaw) return out;
+    const re = _buildFindRegex(needleRaw, opts);
+    if (!re) return out;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      if (tokenHint !== _findBuildToken) return null;
+      const start = m.index;
+      const len = Math.max(1, String(m[0] || "").length);
+      out.push({ start, end: start + len });
+      if (len === 0) re.lastIndex += 1;
+    }
+    return out;
+  }
+
+  function _renderFindOverlay(cardEl, text, needleRaw, opts) {
+    const overlay = cardEl?.querySelector("[data-find-overlay]");
+    const overlayContent = cardEl?.querySelector("[data-find-overlay-content]");
+    if (!overlay || !overlayContent) return;
+    if (!_findState.total || !_findState.isOpen || !needleRaw) {
+      overlay.hidden = true;
+      overlayContent.innerHTML = "";
+      _findOverlayCacheKey = "";
+      return;
+    }
+    const cacheKey = `${needleRaw}::${opts.matchCase ? 1 : 0}::${opts.wholeWord ? 1 : 0}::${_findState.activeIndex}::${text.length}`;
+    if (_findOverlayCacheKey === cacheKey) {
+      overlay.hidden = false;
+      return;
+    }
+    overlay.hidden = false;
+    const markRe = _buildFindRegex(needleRaw, opts);
+    if (!markRe) return;
+    let activeCount = -1;
+    overlayContent.innerHTML = _escapeHtmlLite(text).replace(markRe, (m0) => {
+      activeCount += 1;
+      const activeCls = activeCount === _findState.activeIndex ? " findMatchActive" : "";
+      return `<mark class="findMatch${activeCls}">${_escapeHtmlLite(m0)}</mark>`;
+    });
+    _findOverlayCacheKey = cacheKey;
+  }
+
+  function _rebuildFindMatches(cardEl, tokenHint = _findBuildToken) {
     const editor = cardEl?.querySelector("[data-editor]");
     const findInput = cardEl?.querySelector("[data-find-input]");
     const overlay = cardEl?.querySelector("[data-find-overlay]");
@@ -554,60 +780,124 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
 
     const text = String(editor.value || "");
     const needleRaw = String(findInput.value || "");
-    const needle = needleRaw.toLowerCase();
+    const opts = _getFindOptions(cardEl);
+    if (_findTypingTimer && _findBarHasFocus(cardEl)) return;
+    _findState.lastQuery = needleRaw;
 
     _findMatches = [];
     _findIndex = -1;
+    _findState.matches = [];
+    _findState.activeIndex = -1;
+    _findState.total = 0;
 
     if (!_findOpen || !needleRaw) {
-      overlay.hidden = true;
-      overlayContent.innerHTML = "";
+      _renderFindOverlay(cardEl, text, "", opts);
       _syncFindStatus(cardEl);
       return;
     }
 
-    let idx = 0;
-    const hay = text.toLowerCase();
-    while (idx <= hay.length) {
-      const pos = hay.indexOf(needle, idx);
-      if (pos === -1) break;
-      _findMatches.push({ start: pos, end: pos + needleRaw.length });
-      idx = pos + Math.max(1, needleRaw.length);
-    }
+    const computed = _computeFindMatches(text, needleRaw, opts, tokenHint);
+    if (computed === null) return;
+    _findMatches = computed;
+    _findState.matches = computed;
+    _findState.total = computed.length;
 
     if (!_findMatches.length) {
-      overlay.hidden = true;
-      overlayContent.innerHTML = "";
+      _renderFindOverlay(cardEl, text, needleRaw, opts);
       _syncFindStatus(cardEl);
       return;
     }
 
     _findIndex = 0;
-    overlay.hidden = false;
-
-    const re = new RegExp(_escapeRegExp(needleRaw), "gi");
-    let activeCount = -1;
-    overlayContent.innerHTML = _escapeHtmlLite(text).replace(re, (m) => {
-      activeCount += 1;
-      const activeCls = activeCount === _findIndex ? " findMatchActive" : "";
-      return `<mark class="findMatch${activeCls}">${_escapeHtmlLite(m)}</mark>`;
-    });
+    _findState.activeIndex = 0;
+    _renderFindOverlay(cardEl, text, needleRaw, opts);
 
     const m0 = _findMatches[0];
-    editor.focus();
-    editor.setSelectionRange(m0.start, m0.end);
-    _scrollFindOverlayWithEditor(cardEl);
+    if (!_findBarHasFocus(cardEl)) editor.setSelectionRange(m0.start, m0.end);
+    _scrollEditorToMatch(cardEl, m0);
     _syncFindStatus(cardEl);
   }
 
   function _scheduleFindRebuild(cardEl) {
     if (_findDebounceTimer) clearTimeout(_findDebounceTimer);
-    _findDebounceTimer = setTimeout(() => _rebuildFindMatches(cardEl), 140);
+    const token = ++_findBuildToken;
+    _findState.buildToken = token;
+    _findDebounceTimer = setTimeout(() => _rebuildFindMatches(cardEl, token), 140);
+  }
+
+  function _replaceCurrentFind(cardEl) {
+    if (!_findOpen || !_findMatches.length) return false;
+    const editor = cardEl?.querySelector("[data-editor]");
+    const replaceInput = cardEl?.querySelector("[data-replace-input]");
+    const hadFindFocus = _findBarHasFocus(cardEl);
+    if (!editor || !replaceInput) return false;
+    const m = _findMatches[Math.max(0, _findIndex)];
+    if (!m) return false;
+    const left = String(editor.value || "").slice(0, m.start);
+    const right = String(editor.value || "").slice(m.end);
+    const replacement = String(replaceInput.value || "");
+    editor.value = left + replacement + right;
+    current = String(editor.value || "");
+    const caret = left.length + replacement.length;
+    if (!hadFindFocus) editor.setSelectionRange(caret, caret);
+    scheduleLineNumbersRefresh(editor, cardEl?.querySelector("[data-lines]"));
+    _scheduleFindRebuild(cardEl);
+    _updateEditorStatus(cardEl);
+    if (hadFindFocus) {
+      const findInput = cardEl?.querySelector("[data-find-input]");
+      if (findInput) findInput.focus({ preventScroll: true });
+    }
+    return true;
+  }
+
+  function _replaceAllFind(cardEl) {
+    if (!_findOpen) return 0;
+    const editor = cardEl?.querySelector("[data-editor]");
+    const findInput = cardEl?.querySelector("[data-find-input]");
+    const replaceInput = cardEl?.querySelector("[data-replace-input]");
+    if (!editor || !findInput || !replaceInput) return 0;
+    const needleRaw = String(findInput.value || "");
+    if (!needleRaw) return 0;
+    const re = _buildFindRegex(needleRaw, _getFindOptions(cardEl));
+    if (!re) return 0;
+    let count = 0;
+    const replacement = String(replaceInput.value || "");
+    editor.value = String(editor.value || "").replace(re, () => {
+      count += 1;
+      return replacement;
+    });
+    current = String(editor.value || "");
+    scheduleLineNumbersRefresh(editor, cardEl?.querySelector("[data-lines]"));
+    _scheduleFindRebuild(cardEl);
+    _updateEditorStatus(cardEl);
+    return count;
+  }
+
+  function _updateEditorStatus(cardEl) {
+    const editor = cardEl?.querySelector("[data-editor]");
+    if (!editor) return;
+    const text = String(editor.value || "");
+    const pos = Number.isFinite(editor.selectionStart) ? editor.selectionStart : 0;
+    const upto = text.slice(0, pos);
+    const line = upto.split(/\n/).length;
+    const col = pos - upto.lastIndexOf("\n");
+    _lineEnding = /\r\n/.test(text) ? "CRLF" : "LF";
+    const modeEl = cardEl?.querySelector("[data-status-mode]");
+    const posEl = cardEl?.querySelector("[data-status-pos]");
+    const sizeEl = cardEl?.querySelector("[data-status-size]");
+    const eolEl = cardEl?.querySelector("[data-status-eol]");
+    const encEl = cardEl?.querySelector("[data-status-enc]");
+    if (modeEl) modeEl.textContent = editing ? "Edit" : "View";
+    if (posEl) posEl.textContent = `Ln ${line}, Col ${Math.max(1, col)}`;
+    if (sizeEl) sizeEl.textContent = fmtBytes(text.length);
+    if (eolEl) eolEl.textContent = _lineEnding;
+    if (encEl) encEl.textContent = _encoding;
   }
 
   function _selectFindMatchByIndex(cardEl, nextIndex) {
     const editor = cardEl?.querySelector("[data-editor]");
     const overlayContent = cardEl?.querySelector("[data-find-overlay-content]");
+    const hadFindFocus = _findBarHasFocus(cardEl);
     if (!editor || !_findMatches.length) {
       _syncFindStatus(cardEl);
       return false;
@@ -615,22 +905,31 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
 
     const total = _findMatches.length;
     _findIndex = ((nextIndex % total) + total) % total;
+    _findState.activeIndex = _findIndex;
     const m = _findMatches[_findIndex];
-    editor.focus();
-    editor.setSelectionRange(m.start, m.end);
+    if (!hadFindFocus) editor.setSelectionRange(m.start, m.end);
 
     if (overlayContent) {
       const marks = overlayContent.querySelectorAll("mark.findMatch");
-      marks.forEach((el, i) => el.classList.toggle("findMatchActive", i == _findIndex));
+      if (marks.length === _findMatches.length) {
+        marks.forEach((el, i) => el.classList.toggle("findMatchActive", i == _findIndex));
+      } else {
+        const findInput = cardEl?.querySelector("[data-find-input]");
+        _renderFindOverlay(cardEl, String(editor.value || ""), String(findInput?.value || ""), _getFindOptions(cardEl));
+      }
     }
 
-    _scrollFindOverlayWithEditor(cardEl);
+    _scrollEditorToMatch(cardEl, m);
+    if (hadFindFocus) {
+      const findInput = cardEl?.querySelector("[data-find-input]");
+      if (findInput) findInput.focus({ preventScroll: true });
+    }
     _syncFindStatus(cardEl);
     return true;
   }
 
   function _findInEditor(cardEl, direction) {
-    if (!_findOpen) return false;
+    if (!_findState.isOpen) return false;
     if (!_findMatches.length) {
       _scheduleFindRebuild(cardEl);
       return false;
@@ -691,12 +990,14 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       const gutter = card.querySelector("[data-gutter]");
       updateLineNumbers(editor, gutterPre);
       syncEditorGutterScroll(editor, gutter);
+      _updateEditorStatus(card);
     }
     if (viewer) viewer.style.display = editing ? "none" : "";
     if (btnEdit) btnEdit.classList.toggle("active", editing);
     if (btnSave) btnSave.style.display = editing ? "" : "none";
     if (btnCancel) btnCancel.style.display = editing ? "" : "none";
     if (btnRaw) btnRaw.style.display = !editing ? "" : "none";
+    _updateEditorStatus(card);
   }
 
   card.innerHTML = `
@@ -759,8 +1060,13 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       <div class="fvEditWrap" data-edit-wrap="1" style="display:none">
         <div class="fvFindBar" data-findbar="1" hidden>
           <input type="text" class="fvFindInput" data-find-input="1" placeholder="Find" aria-label="Find in editor" />
+          <input type="text" class="fvFindInput fvReplaceInput" data-replace-input="1" placeholder="Replace" aria-label="Replace in editor" />
+          <label class="fvFindOpt"><input type="checkbox" data-find-case="1" /> Aa</label>
+          <label class="fvFindOpt"><input type="checkbox" data-find-word="1" /> W</label>
           <button class="fvFindBtn" type="button" data-find-prev="1">Prev</button>
           <button class="fvFindBtn" type="button" data-find-next="1">Next</button>
+          <button class="fvFindBtn" type="button" data-replace-next="1">Replace</button>
+          <button class="fvFindBtn" type="button" data-replace-all="1">Replace All</button>
           <button class="fvFindBtn" type="button" data-find-close="1" aria-label="Close find">×</button>
           <span class="fvFindStatus" data-find-status="1"></span>
         </div>
@@ -770,6 +1076,13 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
             <pre class="fvFindOverlay" data-find-overlay="1" hidden><code data-find-overlay-content="1"></code></pre>
             <textarea class="fvEditor" data-editor="1" spellcheck="false" style="display:none"></textarea>
           </div>
+        </div>
+        <div class="fvStatusBar" data-statusbar="1">
+          <span data-status-mode="1">View</span>
+          <span data-status-pos="1">Ln 1, Col 1</span>
+          <span data-status-size="1">${escapeHtml(fmtBytes(sizeBytes))}</span>
+          <span data-status-eol="1">${escapeHtml(_lineEnding)}</span>
+          <span data-status-enc="1">${escapeHtml(_encoding)}</span>
         </div>
       </div>
     </div>
@@ -931,6 +1244,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     const editorEl = card.querySelector("[data-editor]");
     const gutterPre = card.querySelector("[data-lines]");
     scheduleLineNumbersRefresh(editorEl, gutterPre);
+    _updateEditorStatus(card);
     if (_findOpen) _scheduleFindRebuild(card);
   });
 
@@ -941,6 +1255,8 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   });
 
   card.querySelector("[data-editor]")?.addEventListener("keydown", (e) => {
+    const findBar = card.querySelector("[data-findbar]");
+    if (findBar && findBar.contains(document.activeElement)) return;
     if ((e.ctrlKey || e.metaKey) && String(e.key || "").toLowerCase() === "f") {
       e.preventDefault();
       if (!editing) return;
@@ -949,13 +1265,15 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       return;
     }
     if (String(e.key || "") === "Escape") {
-      const findBar = card.querySelector("[data-findbar]");
       if (_findOpen && findBar && !findBar.hidden) {
         e.preventDefault();
         closeFindBar(card, true);
       }
     }
   });
+
+  card.querySelector("[data-editor]")?.addEventListener("click", () => _updateEditorStatus(card));
+  card.querySelector("[data-editor]")?.addEventListener("keyup", () => _updateEditorStatus(card));
 
   card.querySelector("[data-find-close]")?.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -973,6 +1291,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   });
 
   card.querySelector("[data-find-input]")?.addEventListener("keydown", (e) => {
+    e.stopPropagation();
     if (String(e.key || "") === "Escape") {
       e.preventDefault();
       closeFindBar(card, true);
@@ -984,7 +1303,54 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     }
   });
 
-  card.querySelector("[data-find-input]")?.addEventListener("input", () => {
+  card.querySelector("[data-find-input]")?.addEventListener("input", (e) => {
+    e.stopPropagation();
+    if (!_findOpen) return;
+    if (_findTypingTimer) clearTimeout(_findTypingTimer);
+    _findTypingTimer = setTimeout(() => {
+      _findTypingTimer = null;
+      _scheduleFindRebuild(card);
+    }, 120);
+  });
+
+  card.querySelector("[data-find-input]")?.addEventListener("blur", () => {
+    if (_findTypingTimer) {
+      clearTimeout(_findTypingTimer);
+      _findTypingTimer = null;
+      if (_findOpen) _scheduleFindRebuild(card);
+    }
+  });
+
+  card.querySelector("[data-find-input]")?.addEventListener("compositionend", () => {
+    if (!_findOpen) return;
+    _scheduleFindRebuild(card);
+  });
+
+  card.querySelector("[data-replace-input]")?.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+  });
+
+  card.querySelector("[data-replace-input]")?.addEventListener("input", (e) => {
+    e.stopPropagation();
+  });
+
+  card.querySelector("[data-replace-next]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    _replaceCurrentFind(card);
+  });
+
+  card.querySelector("[data-replace-all]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const total = _replaceAllFind(card);
+    if (total > 0) addLog(`[FILE_EDIT] Replaced ${total} match(es) in ${relPath || absPath}`);
+  });
+
+  card.querySelector("[data-find-case]")?.addEventListener("change", () => {
+    if (!_findOpen) return;
+    _scheduleFindRebuild(card);
+  });
+
+  card.querySelector("[data-find-word]")?.addEventListener("change", () => {
     if (!_findOpen) return;
     _scheduleFindRebuild(card);
   });
@@ -1053,10 +1419,25 @@ function syncExpandedIdsFromPaths(tree){
     expanded.clear();
     const walk = (n)=>{
       if(!n) return;
-      if(n.isDir && expandedPaths.has(n.absPath)) expanded.add(n.id);
+      if(n.isDir && expandedPaths.has(_normalizeAbsPath(n.absPath))) expanded.add(n.id);
       if(n.children && n.children.length) n.children.forEach(walk);
     };
     walk(tree);
+  }catch{}
+}
+
+function _cleanupExpandedPathsFromTree(tree){
+  try{
+    const dirSet = new Set();
+    const walk = (n)=>{
+      if(!n) return;
+      if(n.isDir) dirSet.add(_normalizeAbsPath(n.absPath));
+      if(n.children && n.children.length) n.children.forEach(walk);
+    };
+    walk(tree);
+    for(const p of Array.from(expandedPaths)){
+      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
+    }
   }catch{}
 }
 
@@ -1161,9 +1542,968 @@ function _virtualRange(total, rowH, viewportH, scrollTop, overscan) {
   return { start, end };
 }
 
+function _normalizeAbsPath(p) {
+  return String(p || "").replaceAll("\\", "/");
+}
+
+function _isSelectedPath(absPath) {
+  const p = _normalizeAbsPath(absPath);
+  return _exportSelectionState.selected.has(p);
+}
+
+function _toggleSelectedPath(absPath) {
+  const p = _normalizeAbsPath(absPath);
+  if (!p) return;
+  if (_exportSelectionState.selected.has(p)) _exportSelectionState.selected.delete(p);
+  else _exportSelectionState.selected.add(p);
+}
+
+function _collectDescendantsFromSnapshot(snapshot, folderPathNormalized) {
+  const out = [];
+  if (!snapshot?.tree || !folderPathNormalized) return out;
+
+  let target = null;
+  const walkFind = (node) => {
+    if (!node || target) return;
+    if (_normalizeAbsPath(node.absPath) === folderPathNormalized) {
+      target = node;
+      return;
+    }
+    for (const ch of node.children || []) walkFind(ch);
+  };
+  walkFind(snapshot.tree);
+  if (!target) return out;
+
+  const walkDesc = (node) => {
+    if (!node) return;
+    for (const ch of node.children || []) {
+      out.push(_normalizeAbsPath(ch.absPath));
+      walkDesc(ch);
+    }
+  };
+  walkDesc(target);
+  return out;
+}
+
+function _collectSnapshotPathIndex(snapshot) {
+  const all = new Set();
+  const dirs = new Set();
+  const actualByNorm = new Map();
+  const walk = (node) => {
+    if (!node) return;
+    const actual = String(node.absPath || "");
+    const normalized = _normalizeAbsPath(actual);
+    all.add(normalized);
+    if (!actualByNorm.has(normalized)) actualByNorm.set(normalized, actual);
+    if (node.isDir || (Array.isArray(node.children) && node.children.length >= 0)) dirs.add(normalized);
+    for (const ch of node.children || []) walk(ch);
+  };
+  walk(snapshot?.tree || null);
+  return { all, dirs, actualByNorm };
+}
+
+function _applyFolderSelection(selectedSet, folderPathNormalized, isSelecting, descendantsList) {
+  if (!selectedSet || !folderPathNormalized) return;
+  const all = [folderPathNormalized, ...(descendantsList || [])];
+  if (isSelecting) {
+    for (const p of all) selectedSet.add(_normalizeAbsPath(p));
+  } else {
+    for (const p of all) selectedSet.delete(_normalizeAbsPath(p));
+  }
+}
+
+function _cleanupSelectionWithSnapshot(snapshot) {
+  try {
+    if (!snapshot?.projectPath) {
+      _exportSelectionState.selected.clear();
+      return;
+    }
+    const indexSet = new Set();
+    const walk = (node) => {
+      if (!node) return;
+      indexSet.add(_normalizeAbsPath(node.absPath));
+      if (Array.isArray(node.children)) node.children.forEach(walk);
+    };
+    walk(snapshot.tree);
+    const next = new Set();
+    for (const p of _exportSelectionState.selected) {
+      const pn = _normalizeAbsPath(p);
+      if (indexSet.has(pn)) next.add(pn);
+    }
+    _exportSelectionState.selected = next;
+  } catch {}
+}
+
+function _collectExportableFromSelection(snapshot) {
+  const ignoredSet = new Set(snapshot?.ignored || []);
+  const fileRows = [];
+  const walk = (n) => {
+    if (!n) return;
+    if (!n.isDir) {
+      fileRows.push({ absPath: String(n.absPath || "") });
+      return;
+    }
+    for (const ch of n.children || []) walk(ch);
+  };
+  walk(snapshot?.tree);
+  const out = new Set();
+  const selected = _exportSelectionState.selected;
+  const normSel = Array.from(selected).map((p) => _normalizeAbsPath(p));
+
+  for (const r of fileRows) {
+    if (ignoredSet.has(r.absPath)) continue;
+    const ext = path.extname(String(r.absPath || "")) || "";
+    if (DEFAULT_IGNORE_EXTS && DEFAULT_IGNORE_EXTS.has && DEFAULT_IGNORE_EXTS.has(ext)) continue;
+    const rp = _normalizeAbsPath(r.absPath);
+    let picked = selected.has(rp);
+    if (!picked) {
+      for (const s of normSel) {
+        if (!s) continue;
+        if (rp === s || rp.startsWith(s.endsWith("/") ? s : s + "/")) {
+          picked = true;
+          break;
+        }
+      }
+    }
+    if (picked) out.add(rp);
+  }
+  return out;
+}
+
+function _countExportableAll(snapshot) {
+  const ignoredSet = new Set(snapshot?.ignored || []);
+  let count = 0;
+  const walk = (n) => {
+    if (!n) return;
+    if (!n.isDir) {
+      const abs = String(n.absPath || "");
+      if (!ignoredSet.has(abs)) {
+        const ext = path.extname(abs) || "";
+        if (!(DEFAULT_IGNORE_EXTS && DEFAULT_IGNORE_EXTS.has && DEFAULT_IGNORE_EXTS.has(ext))) count += 1;
+      }
+      return;
+    }
+    for (const ch of n.children || []) walk(ch);
+  };
+  walk(snapshot?.tree);
+  return count;
+}
+
+function _collectExportableAll(snapshot) {
+  const ignoredSet = new Set(snapshot?.ignored || []);
+  const out = new Set();
+  const walk = (n) => {
+    if (!n) return;
+    if (!n.isDir) {
+      const abs = String(n.absPath || "");
+      if (!ignoredSet.has(abs)) {
+        const ext = path.extname(abs) || "";
+        if (!(DEFAULT_IGNORE_EXTS && DEFAULT_IGNORE_EXTS.has && DEFAULT_IGNORE_EXTS.has(ext))) {
+          out.add(_normalizeAbsPath(abs));
+        }
+      }
+      return;
+    }
+    for (const ch of n.children || []) walk(ch);
+  };
+  walk(snapshot?.tree);
+  return out;
+}
+
+function _safeRelForExport(root, abs) {
+  try {
+    return String(path.relative(String(root || ""), String(abs || "")) || path.basename(String(abs || ""))).replaceAll("\\", "/");
+  } catch {
+    return String(abs || "").replaceAll("\\", "/");
+  }
+}
+
+function _hashStable(input) {
+  try {
+    return crypto.createHash("sha1").update(String(input || ""), "utf8").digest("hex");
+  } catch {
+    return String(input || "");
+  }
+}
+
+function _buildExportSizeKey(snapshot, profile, resolvedAbs) {
+  const root = String(snapshot?.projectPath || "");
+  const rels = (resolvedAbs || []).map((p) => _safeRelForExport(root, p)).sort((a, b) => a.localeCompare(b));
+  const stats = snapshot?.stats || {};
+  const sigObj = {
+    root,
+    format: profile?.format || "txt",
+    scope: profile?.scope || "all",
+    content_level: profile?.content_level || "full",
+    include_tree: Boolean(profile?.include_tree),
+    include_hashes: Boolean(profile?.include_hashes),
+    include_ignored_summary: Boolean(profile?.include_ignored_summary),
+    sort_mode: profile?.sort_mode || "dir_first_alpha",
+    selected_count: _exportSelectionState.selected.size,
+    stats: {
+      files: Number(stats.files || 0),
+      folders: Number(stats.folders || 0),
+      ignoredFiles: Number(stats.ignoredFiles || 0),
+      ignoredFolders: Number(stats.ignoredFolders || 0),
+    },
+    rels,
+  };
+  return _hashStable(JSON.stringify(sigObj));
+}
+
+function _treeAddExportFile(root, relPath, fileIndex) {
+  const parts = String(relPath || "").split("/").filter(Boolean);
+  let cur = root;
+  for (let i = 0; i < parts.length; i++) {
+    const name = parts[i];
+    const isLast = i === parts.length - 1;
+    const pathRel = parts.slice(0, i + 1).join("/");
+    if (isLast) {
+      cur.children.push({ type: "file", name, path: pathRel, file_index: fileIndex });
+      return;
+    }
+    let next = cur.children.find((c) => c.type === "dir" && c.name === name);
+    if (!next) {
+      next = { type: "dir", name, path: pathRel, children: [] };
+      cur.children.push(next);
+    }
+    cur = next;
+  }
+}
+
+function _sortExportTree(node, sortMode = "dir_first_alpha") {
+  if (!node || !Array.isArray(node.children)) return;
+  for (const ch of node.children) _sortExportTree(ch, sortMode);
+  node.children.sort((a, b) => {
+    if (sortMode === "dir_first_alpha") {
+      const ta = a.type === "dir" ? 0 : 1;
+      const tb = b.type === "dir" ? 0 : 1;
+      if (ta !== tb) return ta - tb;
+    }
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
+}
+
+async function _readFileForExport(absPath, includeContent, includeHashes) {
+  let st = null;
+  try { st = await fs.promises.stat(absPath); } catch {}
+  const sizeBytes = Number(st?.size || 0);
+  const mtimeMs = Number.isFinite(Number(st?.mtimeMs)) ? Number(st.mtimeMs) : null;
+  if (!includeContent && !includeHashes) {
+    return {
+      size_bytes: sizeBytes,
+      mtime_ms: mtimeMs,
+      encoding: null,
+      line_count: null,
+      sha256: null,
+      content: null,
+      content_error: null,
+    };
+  }
+
+  try {
+    const buf = await fs.promises.readFile(absPath);
+    for (let i = 0; i < Math.min(buf.length, 4096); i++) {
+      if (buf[i] === 0) {
+        return {
+          size_bytes: sizeBytes,
+          mtime_ms: mtimeMs,
+          encoding: includeContent ? null : null,
+          line_count: includeContent ? null : null,
+          sha256: includeHashes ? null : null,
+          content: includeContent ? null : null,
+          content_error: includeContent ? "binary_or_decode_failed" : null,
+        };
+      }
+    }
+    const dec = new TextDecoder("utf-8", { fatal: true });
+    const content = dec.decode(buf);
+    const lineCount = content.length ? content.split(/\r?\n/).length : 0;
+    const hash = includeHashes ? crypto.createHash("sha256").update(String(content), "utf8").digest("hex") : null;
+    return {
+      size_bytes: sizeBytes,
+      mtime_ms: mtimeMs,
+      encoding: includeContent ? "utf-8" : null,
+      line_count: includeContent ? lineCount : null,
+      sha256: hash,
+      content: includeContent ? content : null,
+      content_error: includeContent ? null : null,
+    };
+  } catch {
+    return {
+      size_bytes: sizeBytes,
+      mtime_ms: mtimeMs,
+      encoding: includeContent ? null : null,
+      line_count: includeContent ? null : null,
+      sha256: includeHashes ? null : null,
+      content: includeContent ? null : null,
+      content_error: includeContent ? "binary_or_decode_failed" : null,
+    };
+  }
+}
+
+async function _buildUnifiedReportForSize(snapshot, profile, resolvedAbs) {
+  const root = String(snapshot?.projectPath || "");
+  const ignored = Array.from(new Set(snapshot?.ignored || []))
+    .map((p) => _safeRelForExport(root, p))
+    .sort((a, b) => a.localeCompare(b));
+  const includeContent = profile.content_level !== "compact";
+  const includeHashes = Boolean(profile.include_hashes);
+  const absList = Array.from(new Set(resolvedAbs || [])).sort((a, b) => a.localeCompare(b));
+  const files = [];
+
+  for (let i = 0; i < absList.length; i++) {
+    const absPath = absList[i];
+    const meta = await _readFileForExport(absPath, includeContent, includeHashes);
+    const relPath = _safeRelForExport(root, absPath);
+    files.push({
+      path: relPath,
+      ext: path.extname(relPath) || "",
+      size_bytes: meta.size_bytes,
+      mtime_ms: meta.mtime_ms,
+      encoding: meta.encoding,
+      line_count: meta.line_count,
+      sha256: meta.sha256,
+      content: meta.content,
+      content_error: meta.content_error,
+    });
+    if (i % 40 === 0) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  files.sort((a, b) => String(a.path || "").localeCompare(String(b.path || "")));
+
+  const tree = { type: "dir", name: ".", path: "", children: [] };
+  const byPath = {};
+  for (let i = 0; i < files.length; i++) {
+    const rel = String(files[i].path || "").replaceAll("\\", "/");
+    _treeAddExportFile(tree, rel, i);
+    byPath[rel] = i;
+  }
+  _sortExportTree(tree, profile.sort_mode);
+
+  return {
+    schema_version: 1,
+    report_type: "project_report",
+    project: {
+      path: root,
+      generated_at: new Date().toISOString(),
+      generator: "Project Manager & SV Patch",
+      app_version: null,
+    },
+    export: {
+      mode: profile.scope === "selected" ? "selected" : "all",
+      profile,
+      selected_count: profile.scope === "selected" ? _exportSelectionState.selected.size : 0,
+      exported_files_count: files.length,
+      filters: {
+        ignored_exts: Array.from(DEFAULT_IGNORE_EXTS).sort((a, b) => String(a).localeCompare(String(b))),
+        ignored_paths: ignored,
+      },
+    },
+    tree,
+    files,
+    index: { by_path: byPath },
+    project_path: root,
+    generated_at: new Date().toISOString().replace("T", " ").slice(0, 19),
+    ignored,
+  };
+}
+
+function _renderTxtFromReport(report, projectPath) {
+  const lines = [];
+  lines.push("PROJECT REPORT");
+  lines.push("=".repeat(72));
+  lines.push(`Project: ${report.project?.path || projectPath || ""}`);
+  lines.push(`Generated: ${report.project?.generated_at || report.generated_at || ""}`);
+  lines.push(`Mode: ${report.export?.mode || "all"}`);
+  lines.push(`Exported files: ${Number(report.export?.exported_files_count || report.files?.length || 0)}`);
+  lines.push("");
+
+  if (report.export?.profile?.include_tree !== false) {
+    lines.push("EXPORTED TREE");
+    lines.push("-".repeat(72));
+    const walkTree = (node, depth) => {
+      if (!node) return;
+      if (depth > 0) {
+        const pad = "  ".repeat(Math.max(0, depth - 1));
+        lines.push(`${pad}${node.name}${node.type === "dir" ? "/" : ""}`);
+      }
+      if (Array.isArray(node.children)) {
+        for (const ch of node.children) walkTree(ch, depth + 1);
+      }
+    };
+    walkTree(report.tree, 0);
+    lines.push("");
+  }
+
+  if (report.export?.profile?.include_ignored_summary !== false && Array.isArray(report.ignored) && report.ignored.length) {
+    lines.push("Ignored:");
+    for (const ig of report.ignored) lines.push(`- ${ig}`);
+    lines.push("");
+  }
+
+  const files = Array.isArray(report.files) ? report.files : [];
+  for (const file of files) {
+    lines.push("-".repeat(72));
+    lines.push(`File: ${file.path}`);
+    lines.push(`Ext: ${file.ext} · Bytes: ${file.size_bytes ?? 0} · Lines: ${file.line_count ?? "-"} · Encoding: ${file.encoding || "-"}`);
+    lines.push("");
+    if (typeof file.content === "string") lines.push(file.content);
+    else lines.push(`[Could not read: ${file.content_error || "binary_or_decode_failed"}]`);
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function _formatArchiveSizeText(status, bytes, hasError) {
+  if (status === "loading") return "Loading…";
+  if (typeof bytes === "number" && Number.isFinite(bytes)) {
+    const kb = bytes / 1024;
+    const bytesFmt = new Intl.NumberFormat().format(bytes);
+    return `${bytesFmt} bytes (${kb.toFixed(1)} KB)${hasError ? " (error)" : ""}`;
+  }
+  return hasError ? "Loading… (error)" : "Loading…";
+}
+
+function _scheduleExportSizeRecalc(snapshot, profile, resolvedAbs) {
+  if (!snapshot?.projectPath) return;
+  const key = _buildExportSizeKey(snapshot, profile, resolvedAbs);
+  _exportSizeState.key = key;
+
+  if (_exportSizeState.cache.has(key)) {
+    const bytes = _exportSizeState.cache.get(key);
+    _exportSizeState.status = "ready";
+    _exportSizeState.bytes = bytes;
+    _exportSizeState.lastStableBytes = bytes;
+    return;
+  }
+
+  if (_exportSizeState.debounceTimer) {
+    clearTimeout(_exportSizeState.debounceTimer);
+    _exportSizeState.debounceTimer = null;
+  }
+
+  const token = ++_exportSizeState.token;
+  _exportSizeState.status = "loading";
+
+  _exportSizeState.debounceTimer = setTimeout(async () => {
+    try {
+      const report = await _buildUnifiedReportForSize(snapshot, profile, resolvedAbs);
+      if (token !== _exportSizeState.token) return;
+      const rendered = profile.format === "json"
+        ? JSON.stringify(report, null, 2)
+        : _renderTxtFromReport(report, snapshot.projectPath);
+      const bytes = Buffer.byteLength(rendered, "utf8");
+      if (token !== _exportSizeState.token) return;
+      _exportSizeState.cache.set(key, bytes);
+      _exportSizeState.status = "ready";
+      _exportSizeState.bytes = bytes;
+      _exportSizeState.lastStableBytes = bytes;
+      _updateExportLiveSummary(snapshot);
+    } catch {
+      if (token !== _exportSizeState.token) return;
+      _exportSizeState.status = "error";
+      _exportSizeState.bytes = _exportSizeState.lastStableBytes;
+      _updateExportLiveSummary(snapshot);
+    }
+  }, 180);
+}
+
+function _buildExportProfile() {
+  return {
+    profile_id: "default",
+    format: _exportUi.type === "json" ? "json" : "txt",
+    scope: _exportSelectionState.selectedMode === "selected" ? "selected" : "all",
+    content_level: _exportUi.contentLevel === "compact" ? "compact" : "full",
+    include_tree: Boolean(_exportUi.options.treeHeader),
+    include_hashes: Boolean(_exportUi.options.hashes),
+    include_ignored_summary: Boolean(_exportUi.options.ignoredSummary),
+    sort_mode: _exportUi.options.sortDet === false ? "alpha" : "dir_first_alpha",
+    schema_version: 1,
+  };
+}
+
+function _updateExportSelectionMeta(snapshot) {
+  const countEl = el("exportSelectedCount");
+  const selectedCount = _exportSelectionState.selected.size;
+  const resolved = _collectExportableFromSelection(snapshot || lastSnapshot || {}).size;
+  if (countEl) countEl.textContent = `Selected: ${selectedCount} · Resolved files: ${resolved}`;
+  const countElTab = el("exportSelectedCountTab");
+  if (countElTab) countElTab.textContent = `Selected: ${selectedCount} · Resolved files: ${resolved}`;
+  _updateExportLiveSummary(snapshot);
+}
+
+function _writeExportSelectionConfig(snapshot) {
+  try {
+    const root = String(snapshot?.projectPath || "");
+    if (!root) return;
+    const cfgPath = path.join(root, _exportSelectionFile);
+    const payload = {
+      selectedOnly: _exportSelectionState.selectedMode === "selected",
+      selectedMode: _exportSelectionState.selectedMode,
+      profile: _buildExportProfile(),
+      selected: Array.from(_exportSelectionState.selected).map((p) => _normalizeAbsPath(p)),
+      updatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(cfgPath, JSON.stringify(payload, null, 2), "utf-8");
+  } catch {}
+}
+
+function _loadExportUiConfig() {
+  try {
+    const raw = localStorage.getItem("pm_sv_export_ui_v1");
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    if (obj?.type === "txt" || obj?.type === "json") _exportUi.type = obj.type;
+    if (["compact", "standard", "full"].includes(obj?.contentLevel)) _exportUi.contentLevel = obj.contentLevel;
+    if (obj && typeof obj.options === "object") {
+      _exportUi.options.treeHeader = Boolean(obj.options.treeHeader ?? _exportUi.options.treeHeader);
+      _exportUi.options.ignoredSummary = Boolean(obj.options.ignoredSummary ?? _exportUi.options.ignoredSummary);
+      _exportUi.options.hashes = Boolean(obj.options.hashes ?? _exportUi.options.hashes);
+      _exportUi.options.sortDet = Boolean(obj.options.sortDet ?? _exportUi.options.sortDet);
+    }
+  } catch {}
+}
+
+function _saveExportUiConfig() {
+  try {
+    localStorage.setItem("pm_sv_export_ui_v1", JSON.stringify(_exportUi));
+  } catch {}
+}
+
+function _setPresetFeedback(message, mode = "none") {
+  const fb = el("presetFeedback");
+  if (!fb) return;
+  fb.textContent = message || "Preset: idle";
+  fb.classList.remove("ok", "partial", "broken", "loading", "error", "cancel");
+  if (mode && mode !== "none") fb.classList.add(mode);
+}
+function _defaultPresetName() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `preset-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.pmspreset.json`;
+}
+
+function _setPresetFeedbackTimed(message, mode = "none", ttl = 4800) {
+  _setPresetFeedback(message, mode);
+  try { if (_exportPresetState.feedbackTimer) clearTimeout(_exportPresetState.feedbackTimer); } catch {}
+  if (mode === "loading") return;
+  _exportPresetState.feedbackTimer = setTimeout(() => {
+    if (_exportPresetState.lastPresetPath) {
+      _setPresetFeedback(`Preset file: ${path.basename(_exportPresetState.lastPresetPath)}`, "none");
+    } else {
+      _setPresetFeedback("Preset: idle", "none");
+    }
+  }, Math.max(1200, Number(ttl || 0)));
+}
+
+function _setPresetActionButtonsBusy(busy) {
+  const bSave = el("btnPresetSaveFile");
+  const bImport = el("btnPresetImportFile");
+  if (bSave) bSave.disabled = !!busy;
+  if (bImport) bImport.disabled = !!busy;
+}
+
+// Backward compatibility shim for legacy preset UI calls.
+function _refreshPresetControlsUi() {
+  _setPresetActionButtonsBusy(Boolean(_exportPresetState.applying));
+  if (_exportPresetState.lastPresetPath) {
+    _setPresetFeedback(`Preset file: ${path.basename(_exportPresetState.lastPresetPath)}`, "none");
+  } else {
+    _setPresetFeedback("Preset: idle", "none");
+  }
+}
+
+function _markPresetRefreshCycle() {
+  try {
+    _exportPresetState.applyToken = Number(_exportPresetState.applyToken || 0) + 1;
+  } catch {}
+}
+
+function _maybeAutoApplyPreset(_snapshot) {
+  // File-based preset workflow is explicit/manual-only.
+  // Keep as compatibility no-op so legacy call sites cannot throw.
+  return false;
+}
+
+function _buildPresetV1(snapshot) {
+  const selected = _normalizePathList(Array.from(_exportSelectionState.selected || []));
+  const hidden = _normalizePathList(snapshot?.ignored || []);
+  return {
+    schema_version: "preset.v1",
+    created_at: new Date().toISOString(),
+    project_root: String(snapshot?.projectPath || ""),
+    export: {
+      profile: _sanitizeExportProfileForPreset(_buildExportProfile()),
+      scope: {
+        mode: _exportSelectionState.selectedMode === "selected" ? "selected" : "all",
+        selected,
+      },
+      hidden_paths: hidden,
+    },
+    tree: {
+      expanded_paths: _normalizePathList(Array.from(expandedPaths || [])),
+    },
+  };
+}
+
+
+function _sanitizeExportProfileForPreset(profile) {
+  const p = { ...(profile || {}) };
+  if (Object.prototype.hasOwnProperty.call(p, "schema_version")) {
+    p.export_schema_version = p.schema_version;
+    delete p.schema_version;
+  }
+  return p;
+}
+
+function _normalizePathList(list, projectRoot = "") {
+  if (!Array.isArray(list)) return [];
+  const root = _normalizeAbsPath(projectRoot || "");
+  const out = [];
+  for (const raw of list) {
+    let p = String(raw || "").trim();
+    if (!p) continue;
+    p = _normalizeAbsPath(p);
+    if (root && !path.isAbsolute(p)) p = _normalizeAbsPath(path.join(root, p));
+    out.push(p);
+  }
+  return Array.from(new Set(out));
+}
+
+async function _awaitStateUpdateOnce(timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      resolve({ ok: false, timeout: true });
+    }, Math.max(100, Number(timeoutMs || 0)));
+    _stateUpdateWaiters.push((snapshot) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ ok: true, snapshot });
+    });
+  });
+}
+
+async function _applyHiddenPathsFromPreset(snapshot, presetHiddenPaths) {
+  const idxRaw = _collectSnapshotPathIndex(snapshot || {});
+  const idx = {
+    all: idxRaw?.all instanceof Set ? idxRaw.all : new Set(),
+    actualByNorm: idxRaw?.actualByNorm instanceof Map ? idxRaw.actualByNorm : new Map(),
+    ignoredSet: new Set(Array.isArray(snapshot?.ignored) ? snapshot.ignored.map((p) => _normalizeAbsPath(p)) : []),
+  };
+  const requestedHidden = _normalizePathList(presetHiddenPaths || [], snapshot?.projectPath || "");
+  const hiddenToRestore = [];
+  for (const hp of requestedHidden) {
+    if (!hp || !idx.all.has(hp)) continue;
+    const actual = idx.actualByNorm.get(hp) || hp;
+    hiddenToRestore.push(actual);
+  }
+
+  await ipcRenderer.invoke("tree:clearIgnored");
+  for (const hp of hiddenToRestore) {
+    await ipcRenderer.invoke("tree:toggleIgnored", hp);
+  }
+
+  const stateAck = await _awaitStateUpdateOnce(1500);
+  if (stateAck.ok && stateAck.snapshot) {
+    lastSnapshot = stateAck.snapshot;
+  } else if (snapshot && typeof snapshot === "object") {
+    snapshot.ignored = hiddenToRestore.slice();
+  }
+
+  return {
+    requestedHidden,
+    hiddenToRestore,
+    applied: hiddenToRestore.length,
+    requested: requestedHidden.length,
+    missing: Math.max(0, requestedHidden.length - hiddenToRestore.length),
+    stateConfirmed: Boolean(stateAck.ok),
+    snapshot: stateAck.snapshot || snapshot,
+  };
+}
+
+function _validatePresetV1(presetObj, snapshot) {
+  if (!presetObj || typeof presetObj !== "object") return { ok: false, error: "Preset JSON must be an object" };
+  if (presetObj.schema_version !== "preset.v1") return { ok: false, error: "Invalid schema_version (expected preset.v1)" };
+  if (!snapshot?.projectPath) return { ok: false, error: "No active project" };
+  if (String(presetObj.project_root || "") !== String(snapshot.projectPath || "")) {
+    return { ok: false, error: "Preset belongs to another project", mismatch: true };
+  }
+  if (!presetObj.export || typeof presetObj.export !== "object") return { ok: false, error: "Missing export section" };
+  return { ok: true };
+}
+
+function _classifyPresetApplyHealth(snapshot, requestedSelection, requestedHidden) {
+  const idx = _collectSnapshotPathIndex(snapshot || {});
+  const reqSel = _normalizePathList(requestedSelection || []);
+  const reqHidden = _normalizePathList(requestedHidden || []);
+  let selResolved = 0;
+  let selMissing = 0;
+  for (const p of reqSel) {
+    if (idx.all.has(p)) selResolved += 1;
+    else selMissing += 1;
+  }
+  let hiddenResolved = 0;
+  let hiddenMissing = 0;
+  for (const p of reqHidden) {
+    if (idx.all.has(p)) hiddenResolved += 1;
+    else hiddenMissing += 1;
+  }
+  const requestedTotal = reqSel.length + reqHidden.length;
+  const resolvedTotal = selResolved + hiddenResolved;
+  const missing = selMissing + hiddenMissing;
+  let status = "OK";
+  if (missing > 0) status = resolvedTotal > 0 || requestedTotal === 0 ? "PARTIAL" : "BROKEN";
+  return { status, missing, hiddenResolved, hiddenRequested: reqHidden.length, selResolved, selRequested: reqSel.length };
+}
+
+function _applyExportProfileToUi(profile) {
+  if (!profile || typeof profile !== "object") return;
+  _exportUi.type = profile.format === "json" ? "json" : "txt";
+  _exportUi.contentLevel = profile.content_level === "compact" ? "compact" : "full";
+  _exportUi.options.treeHeader = Boolean(profile.include_tree);
+  _exportUi.options.ignoredSummary = Boolean(profile.include_ignored_summary);
+  _exportUi.options.hashes = Boolean(profile.include_hashes);
+  _exportUi.options.sortDet = profile.sort_mode !== "alpha";
+  _syncExportUiControls();
+  _saveExportUiConfig();
+}
+
+async function _applyPresetV1(snapshot, presetObj) {
+  const token = ++_exportPresetState.applyToken;
+  _exportPresetState.applying = true;
+  _setPresetActionButtonsBusy(true);
+  _setPresetFeedbackTimed("Applying preset… Loading…", "loading");
+
+  try {
+    const valid = _validatePresetV1(presetObj, snapshot);
+    if (!valid.ok) {
+      _setPresetFeedbackTimed(`Error: ${valid.error}`, valid.mismatch ? "broken" : "error", 5200);
+      try { addLog(`[PRESET] import rejected: ${valid.error}`); } catch {}
+      return;
+    }
+
+    const idxRaw = _collectSnapshotPathIndex(snapshot || {});
+    const idx = {
+      all: idxRaw?.all instanceof Set ? idxRaw.all : new Set(),
+      dirs: idxRaw?.dirs instanceof Set ? idxRaw.dirs : new Set(),
+    };
+    if (__PM_UI_DEV__ && !(idxRaw?.dirs instanceof Set)) {
+      console.error("[PRESET] idx.dirs missing before apply", typeof idxRaw?.dirs, idxRaw?.dirs);
+    }
+
+    const expandedSrc = Array.isArray(presetObj?.tree?.expanded_paths) ? presetObj.tree.expanded_paths : [];
+    expandedPaths.clear();
+    for (const ep of expandedSrc) {
+      const p = _normalizeAbsPath(ep);
+      if (p && idx.dirs.has(p)) expandedPaths.add(p);
+    }
+
+    const requestedSelection = _normalizePathList(presetObj?.export?.scope?.selected || [], snapshot?.projectPath || "");
+    const requestedHidden = _normalizePathList(presetObj?.export?.hidden_paths || [], snapshot?.projectPath || "");
+    _exportSelectionState.selectedMode = presetObj?.export?.scope?.mode === "selected" ? "selected" : "all";
+
+    _setPresetFeedbackTimed("Applying hidden paths…", "loading");
+    let hiddenResult = { requestedHidden, hiddenToRestore: [], applied: 0, requested: requestedHidden.length, missing: requestedHidden.length, stateConfirmed: true, snapshot };
+    try {
+      hiddenResult = await _applyHiddenPathsFromPreset(snapshot, requestedHidden);
+      snapshot = hiddenResult.snapshot || snapshot;
+      if (__PM_UI_DEV__) console.log(`[PRESET] hidden apply ${hiddenResult.applied}/${hiddenResult.requested} confirmed=${hiddenResult.stateConfirmed}`);
+    } catch (hiddenErr) {
+      if (__PM_UI_DEV__) console.error("[PRESET] hidden restore failed", hiddenErr);
+      hiddenResult.stateConfirmed = false;
+    }
+
+    if (token !== _exportPresetState.applyToken) return;
+
+    if (!(_exportSelectionState.selected instanceof Set)) _exportSelectionState.selected = new Set();
+    _exportSelectionState.selected.clear();
+    for (const p0 of requestedSelection) {
+      const p = _normalizeAbsPath(p0);
+      if (!p || !idx.all.has(p)) continue;
+      _exportSelectionState.selected.add(p);
+      if (idx.dirs.has(p)) {
+        const descendants = _collectDescendantsFromSnapshot(snapshot, p);
+        for (const d of descendants) {
+          const dn = _normalizeAbsPath(d);
+          if (idx.all.has(dn)) _exportSelectionState.selected.add(dn);
+        }
+      }
+    }
+
+    const presetProfile = { ...(presetObj?.export?.profile || {}) };
+    if (!Object.prototype.hasOwnProperty.call(presetProfile, "schema_version") && Object.prototype.hasOwnProperty.call(presetProfile, "export_schema_version")) {
+      presetProfile.schema_version = presetProfile.export_schema_version;
+    }
+    _applyExportProfileToUi(presetProfile);
+
+    const mainChk = el("chkExportSelectedOnly");
+    const tabChk = el("chkExportSelectedOnlyTab");
+    const isSel = _exportSelectionState.selectedMode === "selected";
+    if (mainChk) mainChk.checked = isSel;
+    if (tabChk) tabChk.checked = isSel;
+
+    render(snapshot);
+    _updateExportSelectionMeta(snapshot);
+    if (snapshot?.projectPath) _writeExportSelectionConfig(snapshot);
+
+    const h = _classifyPresetApplyHealth(snapshot, requestedSelection, requestedHidden);
+    if (!hiddenResult.stateConfirmed && h.status === "OK") h.status = "PARTIAL";
+    _exportPresetState.lastHealth = String(h.status || "OK").toLowerCase();
+    const mode = h.status === "OK" ? "ok" : (h.status === "PARTIAL" ? "partial" : "broken");
+    const confirmSuffix = hiddenResult.stateConfirmed ? "" : " (ignored state not confirmed)";
+    _setPresetFeedbackTimed(`Applied preset: ${h.status} (hidden restored ${h.hiddenResolved}/${h.hiddenRequested})${confirmSuffix}`, mode, 5200);
+    try { addLog(`[PRESET] applied: ${h.status} missing=${h.missing} hidden=${h.hiddenResolved}/${h.hiddenRequested} confirmed=${hiddenResult.stateConfirmed}`); } catch {}
+  } catch (e) {
+    _setPresetFeedbackTimed(`Error: ${e?.message || e}`, "error", 5200);
+    try { addLog(`[PRESET] apply error: ${e?.message || e}`); } catch {}
+  } finally {
+    if (token === _exportPresetState.applyToken) {
+      _exportPresetState.applying = false;
+      _setPresetActionButtonsBusy(false);
+    }
+  }
+}
+
+async function _savePresetToFile(snapshot) {
+  if (!snapshot?.projectPath) {
+    _setPresetFeedbackTimed("Error: open a project first", "error", 4200);
+    return;
+  }
+  _setPresetActionButtonsBusy(true);
+  _setPresetFeedbackTimed("Saving preset…", "loading");
+  try {
+    const preset = _buildPresetV1(snapshot);
+    const payload = {
+      suggestedName: _defaultPresetName(),
+      projectRoot: String(snapshot.projectPath || ""),
+      presetJsonString: JSON.stringify(preset, null, 2),
+    };
+    const res = await ipcRenderer.invoke("preset:saveAs", payload);
+    if (res?.canceled) {
+      _setPresetFeedbackTimed("Canceled", "cancel", 2800);
+      try { addLog("[PRESET] save canceled"); } catch {}
+      return;
+    }
+    if (!res?.ok) {
+      _setPresetFeedbackTimed(`Error: ${res?.error || "save failed"}`, "error", 5200);
+      try { addLog(`[PRESET] save error: ${res?.error || "save failed"}`); } catch {}
+      return;
+    }
+    _exportPresetState.lastPresetPath = String(res.path || "");
+    _setPresetFeedbackTimed(`Saved: ${path.basename(String(res.path || "preset"))} (hidden: ${preset.export.hidden_paths.length}, selected: ${preset.export.scope.selected.length})`, "ok", 4200);
+    try { addLog(`[PRESET] saved: ${res.path}`); } catch {}
+  } catch (e) {
+    _setPresetFeedbackTimed(`Error: ${e?.message || e}`, "error", 5200);
+  } finally {
+    _setPresetActionButtonsBusy(false);
+  }
+}
+
+async function _importPresetFromFile(snapshot) {
+  if (!snapshot?.projectPath) {
+    _setPresetFeedbackTimed("Error: open a project first", "error", 4200);
+    return;
+  }
+  _setPresetActionButtonsBusy(true);
+  _setPresetFeedbackTimed("Importing preset…", "loading");
+  try {
+    const res = await ipcRenderer.invoke("preset:open", { projectRoot: String(snapshot.projectPath || "") });
+    if (res?.canceled) {
+      _setPresetFeedbackTimed("Canceled", "cancel", 2800);
+      try { addLog("[PRESET] import canceled"); } catch {}
+      return;
+    }
+    if (!res?.ok) {
+      _setPresetFeedbackTimed(`Error: ${res?.error || "import failed"}`, "error", 5200);
+      try { addLog(`[PRESET] import error: ${res?.error || "import failed"}`); } catch {}
+      return;
+    }
+
+    let parsed = null;
+    try { parsed = JSON.parse(String(res.contents || "")); }
+    catch (e) {
+      _setPresetFeedbackTimed(`Error: invalid JSON (${e?.message || e})`, "error", 5200);
+      try { addLog(`[PRESET] invalid JSON: ${e?.message || e}`); } catch {}
+      return;
+    }
+
+    _exportPresetState.lastPresetPath = String(res.path || "");
+    _setPresetFeedbackTimed(`Imported: ${path.basename(String(res.path || "preset"))}`, "ok", 2200);
+    await _applyPresetV1(snapshot, parsed);
+  } catch (e) {
+    _setPresetFeedbackTimed(`Error: ${e?.message || e}`, "error", 5200);
+  } finally {
+    _setPresetActionButtonsBusy(false);
+  }
+}
+
+
+function _syncExportUiControls() {
+  const typeTxt = el("btnExportTypeTxt");
+  const typeJson = el("btnExportTypeJson");
+  if (typeTxt) typeTxt.classList.toggle("active", _exportUi.type === "txt");
+  if (typeJson) typeJson.classList.toggle("active", _exportUi.type === "json");
+
+  const cCompact = el("btnContentCompact");
+  const cStandard = el("btnContentStandard");
+  const cFull = el("btnContentFull");
+  if (cCompact) cCompact.classList.toggle("active", _exportUi.contentLevel === "compact");
+  if (cStandard) cStandard.classList.toggle("active", _exportUi.contentLevel === "standard");
+  if (cFull) cFull.classList.toggle("active", _exportUi.contentLevel === "full");
+
+  const oTree = el("optTreeHeader");
+  const oIgnored = el("optIgnoredSummary");
+  const oHashes = el("optHashes");
+  const oSort = el("optSortDet");
+  if (oTree) oTree.checked = Boolean(_exportUi.options.treeHeader);
+  if (oIgnored) oIgnored.checked = Boolean(_exportUi.options.ignoredSummary);
+  if (oHashes) oHashes.checked = Boolean(_exportUi.options.hashes);
+  if (oSort) oSort.checked = Boolean(_exportUi.options.sortDet);
+}
+
+function _updateExportLiveSummary(snapshot) {
+  const elSum = el("exportLiveSummary");
+  if (!elSum) return;
+  const activeSnapshot = snapshot || lastSnapshot || {};
+  const profile = _buildExportProfile();
+  const mode = profile.scope === "selected" ? "Selected" : "All";
+  const selected = _exportSelectionState.selected.size;
+  const resolvedSet = profile.scope === "selected"
+    ? _collectExportableFromSelection(activeSnapshot)
+    : _collectExportableAll(activeSnapshot);
+  const resolvedAbs = Array.from(resolvedSet || []);
+  const resolved = resolvedAbs.length;
+
+  _scheduleExportSizeRecalc(activeSnapshot, profile, resolvedAbs);
+
+  const showBytes = _exportSizeState.status === "ready"
+    ? _exportSizeState.bytes
+    : (_exportSizeState.status === "error" ? _exportSizeState.lastStableBytes : null);
+  const sizeText = _formatArchiveSizeText(_exportSizeState.status, showBytes, _exportSizeState.status === "error");
+  elSum.textContent = `Mode: ${mode} · Selected: ${selected} · Resolved files: ${resolved} · Format: ${String(profile.format || "txt").toUpperCase()} · Tree: ${profile.include_tree ? "yes" : "no"} · Export archive size: ${sizeText}`;
+}
+
+async function _runExportByType(type) {
+  const t = String(type || _exportUi.type || "txt").toLowerCase();
+  if (t === "json") {
+    showToast("Exporting JSON…", { type: "info", ttl: 1800 });
+    await ipcRenderer.invoke("export:json");
+    return;
+  }
+  showToast("Exporting TXT…", { type: "info", ttl: 1800 });
+  await ipcRenderer.invoke("export:txt");
+}
+
 function _buildFileRow(r, snapshot) {
   const row = document.createElement("div");
-  row.className = "row" + (r.id === selectedId ? " selected" : "") + (r.ignored ? " ignored" : "");
+  const picked = _isSelectedPath(r.absPath);
+  row.className = "row" + (r.id === selectedId ? " selected" : "") + (r.ignored ? " ignored" : "") + (picked ? " row-picked" : "");
 
   const indentPx = r.depth * 16;
 
@@ -1183,6 +2523,7 @@ function _buildFileRow(r, snapshot) {
 
   row.innerHTML = `
     <div class="rowLeft" style="padding-left:${indentPx}px">
+      <input type="checkbox" class="rowPick" data-select="1" aria-label="Select for export" ${picked ? "checked" : ""} ${r.ignored ? "disabled" : ""} />
       ${caret}
       <span class="fileIco">${icon}</span>
       <div class="name" title="${r.name}">${r.name}</div>
@@ -1200,18 +2541,39 @@ function _buildFileRow(r, snapshot) {
     const target = e.target;
     if (
       target.closest &&
-      (target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
+      (target.closest("[data-select]") || target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
     )
       return;
     selectedId = r.id;
     render(snapshot);
   });
 
+  row.querySelector("[data-select]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (r.ignored) return;
+    const p = _normalizeAbsPath(r.absPath);
+    if (r.isDir) {
+      const descendants = _collectDescendantsFromSnapshot(snapshot, p);
+      const isSelecting = !_exportSelectionState.selected.has(p);
+      _applyFolderSelection(_exportSelectionState.selected, p, isSelecting, descendants);
+    } else {
+      _toggleSelectedPath(p);
+    }
+    _updateExportSelectionMeta(snapshot);
+    render(snapshot);
+  });
+
   row.querySelector("[data-caret]")?.addEventListener("click", (e) => {
     e.stopPropagation();
     if (!r.isDir) return;
-    if (expanded.has(r.id)) expanded.delete(r.id);
-    else expanded.add(r.id);
+    const folderPath = _normalizeAbsPath(r.absPath);
+    if (expanded.has(r.id)) {
+      expanded.delete(r.id);
+      expandedPaths.delete(folderPath);
+    } else {
+      expanded.add(r.id);
+      expandedPaths.add(folderPath);
+    }
     render(snapshot);
   });
 
@@ -1240,7 +2602,7 @@ function _buildFileRow(r, snapshot) {
     const target = e.target;
     if (
       target.closest &&
-      (target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
+      (target.closest("[data-select]") || target.closest("[data-caret]") || target.closest("[data-eye]") || target.closest("[data-view]"))
     )
       return;
 
@@ -1362,11 +2724,17 @@ function renderManifest(manifest) {
 
 function render(snapshot) {
   lastSnapshot = snapshot;
+  _cleanupSelectionWithSnapshot(snapshot);
 
   el("projectPath").textContent = snapshot.projectPath || "No folder opened";
   el("itemsCount").textContent = `${snapshot.stats.items} items`;
   _updateItemsCount(snapshot, null);
   el("statusLine").textContent = snapshot.status || "Ready.";
+  const chkSelectedOnly = el("chkExportSelectedOnly");
+  if (chkSelectedOnly) chkSelectedOnly.checked = _exportSelectionState.selectedMode === "selected";
+  const chkSelectedOnlyTab = el("chkExportSelectedOnlyTab");
+  if (chkSelectedOnlyTab) chkSelectedOnlyTab.checked = _exportSelectionState.selectedMode === "selected";
+  _syncExportUiControls();
 
   el("stats").textContent =
     `Folders: ${snapshot.stats.folders} · Files: ${snapshot.stats.files} · Ignored: ${
@@ -1445,6 +2813,9 @@ try{
     return;
   }
 
+  _cleanupExpandedPathsFromTree(snapshot.tree);
+  syncExpandedIdsFromPaths(snapshot.tree);
+
   const rows = [];
   const searchMode = _fileSearchMode(filesSearchQuery);
   if (searchMode) {
@@ -1462,6 +2833,15 @@ try{
   _fileRowsCache = rows;
   _fileRowsSnapshot = snapshot;
   _renderVirtualFileRows(list, rows, snapshot);
+  _updateExportSelectionMeta(snapshot);
+
+  if (!_exportPresetState.applying) {
+    if (_exportPresetState.lastPresetPath) {
+      _setPresetFeedback(`Preset file: ${path.basename(_exportPresetState.lastPresetPath)}`, "none");
+    } else {
+      _setPresetFeedback("Preset: idle", "none");
+    }
+  }
 }
 
 function _previewActionLabel(action) {
@@ -2168,6 +3548,11 @@ async function _confirmApplyFromDiffModal() {
 }
 
 function bind() {
+  _loadExportUiConfig();
+  try{
+    const prof = _buildExportProfile();
+    _exportSelectionState.selectedMode = prof.scope === "selected" ? "selected" : "all";
+  }catch{}
   setTabs();
   _bindFileListVirtualEvents();
 
@@ -2198,11 +3583,11 @@ function bind() {
 
   _updateFilesSearchUi();
 
-  el("btnOpen").addEventListener("click", async () => {
+  _bindClickSafe("btnOpen", async () => {
     await ipcRenderer.invoke("project:open");
   });
 
-  el("btnRefreshFiles").addEventListener("click", async () => {
+  _bindClickSafe("btnRefreshFiles", async () => {
     const b = el("btnRefreshFiles");
     if (b?.classList?.contains("busy")) return;
 
@@ -2225,43 +3610,152 @@ function bind() {
     }
   });
 
-  el("btnHelp").addEventListener("click", async () => {
+  _bindClickSafe("btnHelp", async () => {
     await ipcRenderer.invoke("ui:help");
   });
 
-  el("btnClearIgnored").addEventListener("click", async () => {
+  _bindClickSafe("btnClearIgnored", async () => {
     await ipcRenderer.invoke("tree:clearIgnored");
   });
 
-  el("btnExportTxt").addEventListener("click", async () => {
-    showToast("Exporting TXT…", { type: "info", ttl: 1800 });
-    await ipcRenderer.invoke("export:txt");
+  el("chkExportSelectedOnly")?.addEventListener("change", (e) => {
+    _exportSelectionState.selectedMode = e?.target?.checked ? "selected" : "all";
+    const tabChk = el("chkExportSelectedOnlyTab");
+    if (tabChk) tabChk.checked = Boolean(e?.target?.checked);
+    _updateExportSelectionMeta(lastSnapshot);
+    if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
   });
 
-  el("btnExportJson").addEventListener("click", async () => {
-    showToast("Exporting JSON…", { type: "info", ttl: 1800 });
-    await ipcRenderer.invoke("export:json");
+  el("chkExportSelectedOnlyTab")?.addEventListener("change", (e) => {
+    const mainChk = el("chkExportSelectedOnly");
+    if (mainChk) {
+      mainChk.checked = Boolean(e?.target?.checked);
+      mainChk.dispatchEvent(new Event("change"));
+      return;
+    }
+    _exportSelectionState.selectedMode = e?.target?.checked ? "selected" : "all";
+    _updateExportSelectionMeta(lastSnapshot);
+    if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
   });
 
-  el("btnCopyLogs").addEventListener("click", async () => {
+  el("btnSelectAllVisible")?.addEventListener("click", () => {
+    const snapshot = lastSnapshot;
+    if (!snapshot) return;
+    const ignoredSet = new Set(snapshot.ignored || []);
+    for (const r of _fileRowsCache || []) {
+      if (ignoredSet.has(r.absPath)) continue;
+      _exportSelectionState.selected.add(_normalizeAbsPath(r.absPath));
+    }
+    _updateExportSelectionMeta(snapshot);
+    render(snapshot);
+  });
+
+  el("btnClearSelection")?.addEventListener("click", () => {
+    _exportSelectionState.selected.clear();
+    _updateExportSelectionMeta(lastSnapshot);
+    if (lastSnapshot) render(lastSnapshot);
+  });
+
+  el("btnSelectAllVisibleTab")?.addEventListener("click", () => {
+    el("btnSelectAllVisible")?.click();
+  });
+
+  el("btnClearSelectionTab")?.addEventListener("click", () => {
+    el("btnClearSelection")?.click();
+  });
+
+  const _setExportType = (t) => {
+    _exportUi.type = t === "json" ? "json" : "txt";
+    _syncExportUiControls();
+    _updateExportLiveSummary(lastSnapshot);
+    _saveExportUiConfig();
+  };
+
+  el("btnExportTypeTxt")?.addEventListener("click", () => _setExportType("txt"));
+  el("btnExportTypeJson")?.addEventListener("click", () => _setExportType("json"));
+
+  const _setContentLevel = (lvl) => {
+    if (!["compact", "standard", "full"].includes(lvl)) return;
+    _exportUi.contentLevel = lvl;
+    _syncExportUiControls();
+    _updateExportLiveSummary(lastSnapshot);
+    _saveExportUiConfig();
+  };
+
+  el("btnContentCompact")?.addEventListener("click", () => _setContentLevel("compact"));
+  el("btnContentStandard")?.addEventListener("click", () => _setContentLevel("standard"));
+  el("btnContentFull")?.addEventListener("click", () => _setContentLevel("full"));
+
+  const _bindOpt = (id, key) => {
+    el(id)?.addEventListener("change", (ev) => {
+      _exportUi.options[key] = Boolean(ev?.target?.checked);
+      _updateExportLiveSummary(lastSnapshot);
+      _saveExportUiConfig();
+    });
+  };
+  _bindOpt("optTreeHeader", "treeHeader");
+  _bindOpt("optIgnoredSummary", "ignoredSummary");
+  _bindOpt("optHashes", "hashes");
+  _bindOpt("optSortDet", "sortDet");
+  _syncExportUiControls();
+  _updateExportLiveSummary(lastSnapshot);
+
+  _bindClickSafe("btnPresetSaveFile", async () => {
+    await _savePresetToFile(lastSnapshot);
+  });
+
+  _bindClickSafe("btnPresetImportFile", async () => {
+    await _importPresetFromFile(lastSnapshot);
+  });
+
+
+  _bindClickSafe("btnExportTxt", async () => {
+    const chk = el("chkExportSelectedOnly");
+    if (chk) _exportSelectionState.selectedMode = chk.checked ? "selected" : "all";
+    if (lastSnapshot) _cleanupSelectionWithSnapshot(lastSnapshot);
+    if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
+    await _runExportByType("txt");
+  });
+
+  _bindClickSafe("btnExportJson", async () => {
+    const chk = el("chkExportSelectedOnly");
+    if (chk) _exportSelectionState.selectedMode = chk.checked ? "selected" : "all";
+    if (lastSnapshot) _cleanupSelectionWithSnapshot(lastSnapshot);
+    if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
+    await _runExportByType("json");
+  });
+
+  _bindClickSafe("btnExportPrimary", async () => {
+    const tabChk = el("chkExportSelectedOnlyTab");
+    const mainChk = el("chkExportSelectedOnly");
+    if (mainChk && tabChk) mainChk.checked = Boolean(tabChk.checked);
+    if (mainChk) {
+      _exportSelectionState.selectedMode = mainChk.checked ? "selected" : "all";
+    }
+    if (lastSnapshot) _cleanupSelectionWithSnapshot(lastSnapshot);
+    if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
+    await _runExportByType(_exportUi.type);
+  });
+
+  _bindClickSafe("btnCopyLogs", async () => {
     showToast("Logs copied.", { type: "success", ttl: 1600 });
     await ipcRenderer.invoke("logs:copy");
   });
 
-  el("btnClearLogs").addEventListener("click", async () => {
+  _bindClickSafe("btnClearLogs", async () => {
     await ipcRenderer.invoke("logs:clear");
   });
 
   // Patch tools
-  el("btnPickRunner").addEventListener("click", async () => {
+  _bindClickSafe("btnPickRunner", async () => {
     await ipcRenderer.invoke("patch:pickRunner");
   });
 
-  el("btnReloadManifest").addEventListener("click", async () => {
+  _bindClickSafe("btnReloadManifest", async () => {
     await ipcRenderer.invoke("patch:reloadManifest");
   });
 
-  el("btnPickRw").addEventListener("click", async () => {
+  _bindClickSafe("btnPickRw", async () => {
     const res = await ipcRenderer.invoke("patch:pickRw");
     // auto-generate pipeline from current selection
     const list = res?.valid || [];
@@ -2271,7 +3765,7 @@ function bind() {
     }
   });
 
-  el("btnClearRw").addEventListener("click", async () => {
+  _bindClickSafe("btnClearRw", async () => {
     // limpar seleção só no renderer (mantém simples)
     if (!lastSnapshot) return;
     lastSnapshot.patch.selectedRws = [];
@@ -2282,7 +3776,7 @@ function bind() {
     el("pipelinePathLine").textContent = `Pipeline: (not saved)`;
   });
 
-  el("btnSavePipeline").addEventListener("click", async () => {
+  _bindClickSafe("btnSavePipeline", async () => {
     try {
       const outPath = await ipcRenderer.invoke("patch:savePipeline", {
         pipelineText: el("pipelineText").value,
@@ -2297,7 +3791,7 @@ function bind() {
     }
   });
 
-  el("btnRunPlan").addEventListener("click", async () => {
+  _bindClickSafe("btnRunPlan", async () => {
     setPatchBusy(true, "plan");
 
     showToast("Running Plan…", { type: "info", ttl: 1600 });
@@ -2309,7 +3803,7 @@ function bind() {
 }
   });
 
-  el("btnRunApply").addEventListener("click", async () => {
+  _bindClickSafe("btnRunApply", async () => {
     await _runPreviewAndOpenDiffModal("run-apply");
   });
 
@@ -2332,7 +3826,7 @@ function bind() {
     _renderApplyDiffViewer();
   });
 
-  el("btnStopPatch").addEventListener("click", async () => {
+  _bindClickSafe("btnStopPatch", async () => {
     showToast("Stopping patch…", { type: "warn", ttl: 1800 });
     await ipcRenderer.invoke("patch:stop");
   });
@@ -2385,11 +3879,20 @@ function bind() {
     top.remove();
     _syncFvFullscreenState();
   });
+
+  _refreshPresetControlsUi();
+  _reportUiBindHealth();
+
 }
 
 // ─────────────────────────────────────────────
 // IPC events
 ipcRenderer.on("state:update", (_, snapshot) => {
+  lastSnapshot = snapshot;
+  const waiters = _stateUpdateWaiters.splice(0, _stateUpdateWaiters.length);
+  for (const done of waiters) {
+    try { done(snapshot); } catch {}
+  }
   render(snapshot);
 });
 
@@ -2408,6 +3911,82 @@ ipcRenderer.on("watcher:changed", (_ev, payload) => {
   _scheduleAutoRefresh(payload?.reason || "watch");
 });
 
+
+if (__PM_UI_DEV__) {
+  window.addEventListener("error", (ev) => {
+    const msg = String(ev?.message || "unknown");
+    if (msg.includes("is not defined")) {
+      console.error("[UI FATAL] Undefined reference:", msg);
+      try { _setPresetFeedbackTimed(`Error: ${msg}`, "error", 4200); } catch {}
+    }
+    _uiDevLog(`window error: ${ev?.message || "unknown"}`, ev?.error || null);
+  });
+  window.addEventListener("unhandledrejection", (ev) => {
+    const reason = ev?.reason;
+    const msg = String(reason?.message || reason || "");
+    if (msg.includes("is not defined")) {
+      console.error("[UI FATAL] Undefined reference:", msg);
+      try { _setPresetFeedbackTimed(`Error: ${msg}`, "error", 4200); } catch {}
+    }
+    _uiDevLog("unhandled rejection", ev?.reason || null);
+  });
+}
+
+
+if (__PM_UI_TRACE_CLICKS__) {
+  window.addEventListener("pointerdown", (ev) => {
+    try {
+      const t = ev.target;
+      const id = t?.id ? `#${t.id}` : (t?.className ? `.${String(t.className).split(/\s+/)[0]}` : t?.tagName || "unknown");
+      _uiDevLog(`pointerdown target=${id}`);
+    } catch {}
+  }, true);
+}
+
+
+if (__PM_UI_DEV__) {
+  let __uiDiagEnabled = false;
+  let __uiDiagBox = null;
+  let __uiDiagOutline = null;
+  const _diagEnsure = () => {
+    if (__uiDiagBox && __uiDiagOutline) return;
+    __uiDiagBox = document.createElement("div");
+    __uiDiagBox.style.cssText = "position:fixed;right:10px;bottom:10px;z-index:2147483647;padding:6px 8px;border-radius:8px;background:rgba(0,0,0,.82);color:#d1d5db;font:11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;pointer-events:none;white-space:pre;display:none;";
+    __uiDiagOutline = document.createElement("div");
+    __uiDiagOutline.style.cssText = "position:fixed;z-index:2147483646;border:1px dashed #67e8f9;pointer-events:none;display:none;";
+    document.body.appendChild(__uiDiagBox);
+    document.body.appendChild(__uiDiagOutline);
+  };
+  const _diagUpdate = (target) => {
+    if (!__uiDiagEnabled || !target || !(target instanceof Element)) return;
+    _diagEnsure();
+    const r = target.getBoundingClientRect();
+    const cs = getComputedStyle(target);
+    __uiDiagOutline.style.display = "block";
+    __uiDiagOutline.style.left = `${r.left}px`;
+    __uiDiagOutline.style.top = `${r.top}px`;
+    __uiDiagOutline.style.width = `${Math.max(0, r.width)}px`;
+    __uiDiagOutline.style.height = `${Math.max(0, r.height)}px`;
+    __uiDiagBox.style.display = "block";
+    __uiDiagBox.textContent = [
+      `id: ${target.id || "(none)"}`,
+      `class: ${(target.className || "").toString().trim() || "(none)"}`,
+      `z-index: ${cs.zIndex || "auto"}`,
+      `pointer-events: ${cs.pointerEvents || "auto"}`,
+    ].join("\n");
+  };
+  window.addEventListener("keydown", (ev) => {
+    if (!(ev.ctrlKey && ev.altKey && (ev.key === "d" || ev.key === "D"))) return;
+    __uiDiagEnabled = !__uiDiagEnabled;
+    _diagEnsure();
+    if (!__uiDiagEnabled) {
+      __uiDiagBox.style.display = "none";
+      __uiDiagOutline.style.display = "none";
+    }
+    _uiDevLog(`diag-overlay ${__uiDiagEnabled ? "enabled" : "disabled"}`);
+  }, true);
+  window.addEventListener("mousemove", (ev) => _diagUpdate(ev.target), true);
+}
 
 // bootstrap
 bind();

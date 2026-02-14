@@ -1536,6 +1536,7 @@ function _writeExportSelectionConfig(snapshot) {
     const cfgPath = path.join(root, _exportSelectionFile);
     const payload = {
       selectedOnly: _exportSelectionState.selectedMode === "selected",
+      selectedMode: _exportSelectionState.selectedMode,
       selected: Array.from(_exportSelectionState.selected).map((p) => _normalizeAbsPath(p)),
       updatedAt: new Date().toISOString(),
     };
@@ -2661,12 +2662,18 @@ function bind() {
   });
 
   el("btnExportTxt").addEventListener("click", async () => {
+    const chk = el("chkExportSelectedOnly");
+    if (chk) _exportSelectionState.selectedMode = chk.checked ? "selected" : "all";
+    if (lastSnapshot) _cleanupSelectionWithSnapshot(lastSnapshot);
     if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
     showToast("Exporting TXT…", { type: "info", ttl: 1800 });
     await ipcRenderer.invoke("export:txt");
   });
 
   el("btnExportJson").addEventListener("click", async () => {
+    const chk = el("chkExportSelectedOnly");
+    if (chk) _exportSelectionState.selectedMode = chk.checked ? "selected" : "all";
+    if (lastSnapshot) _cleanupSelectionWithSnapshot(lastSnapshot);
     if (lastSnapshot?.projectPath) _writeExportSelectionConfig(lastSnapshot);
     showToast("Exporting JSON…", { type: "info", ttl: 1800 });
     await ipcRenderer.invoke("export:json");

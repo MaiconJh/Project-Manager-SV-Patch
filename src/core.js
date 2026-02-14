@@ -153,7 +153,7 @@ function _loadExportSelectionConfig(state) {
     if (!fs.existsSync(cfgPath)) return { selectedOnly: false, selectedSet: new Set() };
     const raw = fs.readFileSync(cfgPath, "utf-8");
     const obj = JSON.parse(raw || "{}");
-    const selectedOnly = Boolean(obj?.selectedOnly);
+    const selectedOnly = Boolean(obj?.selectedOnly || String(obj?.selectedMode || "").toLowerCase() === "selected");
     const selected = Array.isArray(obj?.selected) ? obj.selected : [];
     return { selectedOnly, selectedSet: new Set(selected.map(String)) };
   } catch {

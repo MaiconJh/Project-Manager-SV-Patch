@@ -143,10 +143,13 @@ Implemented in this version: (1) Refresh SVG icon fix (centered, consistent). (2
                 <button class="btn secondary" id="btnExportJson">Export JSON</button>
               </div>
               <div class="cardRow exportSelRow">
-                <label class="exportSelToggle">
-                  <input type="checkbox" id="chkExportSelectedOnly" />
-                  <span>Export selected only</span>
-                </label>
+                <div class="exportSelToggleWrap">
+                  <span class="exportSelLabel">Export selected only</span>
+                  <label class="exportSelSwitch" aria-label="Export selected only">
+                    <input type="checkbox" id="chkExportSelectedOnly" aria-label="Export selected only" />
+                    <span class="exportSelSlider" aria-hidden="true"></span>
+                  </label>
+                </div>
                 <span class="hint exportSelCount" id="exportSelectedCount">Selected: 0</span>
               </div>
               <div class="cardRow exportSelActions">

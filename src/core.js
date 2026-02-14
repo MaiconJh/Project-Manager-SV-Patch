@@ -289,16 +289,20 @@ function buildUnifiedProjectReport(projectRootAbs, legacyModel, selectionState =
   const mode = profile.scope === "selected" ? "selected" : "all";
   const selectedCount = Number(selectionState.selected_count || 0);
 
-  const tree = { type: "dir", name: ".", path: "", children: [] };
   const byPath = {};
   for (let i = 0; i < files.length; i++) {
     const rel = String(files[i].path || "").replaceAll("\\", "/");
-    _treeAddFile(tree, rel, i);
     byPath[rel] = i;
   }
-  _sortTree(tree, profile.sort_mode);
 
-  return {
+  const filters = {
+    ignored_exts: Array.from(DEFAULT_IGNORE_EXTS).sort((a, b) => String(a).localeCompare(String(b))),
+  };
+  if (profile.include_ignored_summary === true) {
+    filters.ignored_paths = ignored.slice().sort((a, b) => String(a).localeCompare(String(b)));
+  }
+
+  const report = {
     // canonical
     schema_version: 1,
     report_type: "project_report",
@@ -313,12 +317,8 @@ function buildUnifiedProjectReport(projectRootAbs, legacyModel, selectionState =
       profile,
       selected_count: selectedCount,
       exported_files_count: files.length,
-      filters: {
-        ignored_exts: Array.from(DEFAULT_IGNORE_EXTS).sort((a, b) => String(a).localeCompare(String(b))),
-        ignored_paths: ignored.slice().sort((a, b) => String(a).localeCompare(String(b))),
-      },
+      filters,
     },
-    tree,
     files,
     index: {
       by_path: byPath,
@@ -329,7 +329,20 @@ function buildUnifiedProjectReport(projectRootAbs, legacyModel, selectionState =
     generated_at: legacyModel?.generated_at || new Date().toISOString().replace("T", " ").slice(0, 19),
     ignored,
   };
+
+  if (profile.include_tree === true) {
+    const tree = { type: "dir", name: ".", path: "", children: [] };
+    for (let i = 0; i < files.length; i++) {
+      const rel = String(files[i].path || "").replaceAll("\\", "/");
+      _treeAddFile(tree, rel, i);
+    }
+    _sortTree(tree, profile.sort_mode);
+    report.tree = tree;
+  }
+
+  return report;
 }
+
 
 function buildExportModel(state, opts = null) {
   if (!state.projectPath) throw new Error("Nenhum projeto carregado.");

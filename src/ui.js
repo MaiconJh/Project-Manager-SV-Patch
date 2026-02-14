@@ -1364,6 +1364,21 @@ function _cleanupExpandedPathsFromTree(tree){
   }catch{}
 }
 
+function _cleanupExpandedPathsFromTree(tree){
+  try{
+    const dirSet = new Set();
+    const walk = (n)=>{
+      if(!n) return;
+      if(n.isDir) dirSet.add(_normalizeAbsPath(n.absPath));
+      if(n.children && n.children.length) n.children.forEach(walk);
+    };
+    walk(tree);
+    for(const p of Array.from(expandedPaths)){
+      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
+    }
+  }catch{}
+}
+
 function flattenTree(node, depth, out, ignoredSet) {
   const hasChildren = node.isDir && node.children && node.children.length > 0;
   out.push({

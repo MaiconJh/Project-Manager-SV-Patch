@@ -563,6 +563,30 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     overlay.scrollLeft = editor.scrollLeft;
   }
 
+  function _findBarHasFocus(cardEl) {
+    const findBar = cardEl?.querySelector("[data-findbar]");
+    const ae = document.activeElement;
+    return Boolean(findBar && ae && findBar.contains(ae));
+  }
+
+  function _scrollEditorToMatch(cardEl, match) {
+    const editor = cardEl?.querySelector("[data-editor]");
+    if (!editor || !match) return;
+    const txt = String(editor.value || "").slice(0, Math.max(0, match.start));
+    const lineIndex = txt.split("\n").length - 1;
+    const cs = window.getComputedStyle(editor);
+    const lineHeight = Number.parseFloat(cs.lineHeight) || 18;
+    const padTop = Number.parseFloat(cs.paddingTop) || 0;
+    const targetTop = padTop + (lineIndex * lineHeight);
+    const nextTop = clamp(
+      Math.round(targetTop - (editor.clientHeight / 2) + (lineHeight / 2)),
+      0,
+      Math.max(0, editor.scrollHeight - editor.clientHeight)
+    );
+    if (Math.abs((editor.scrollTop || 0) - nextTop) > 1) editor.scrollTop = nextTop;
+    _scrollFindOverlayWithEditor(cardEl);
+  }
+
   function _rebuildFindMatches(cardEl, tokenHint = _findBuildToken) {
     const editor = cardEl?.querySelector("[data-editor]");
     const findInput = cardEl?.querySelector("[data-find-input]");
@@ -621,9 +645,8 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     });
 
     const m0 = _findMatches[0];
-    editor.focus();
-    editor.setSelectionRange(m0.start, m0.end);
-    _scrollFindOverlayWithEditor(cardEl);
+    if (!_findBarHasFocus(cardEl)) editor.setSelectionRange(m0.start, m0.end);
+    _scrollEditorToMatch(cardEl, m0);
     _syncFindStatus(cardEl);
   }
 
@@ -637,6 +660,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     if (!_findOpen || !_findMatches.length) return false;
     const editor = cardEl?.querySelector("[data-editor]");
     const replaceInput = cardEl?.querySelector("[data-replace-input]");
+    const hadFindFocus = _findBarHasFocus(cardEl);
     if (!editor || !replaceInput) return false;
     const m = _findMatches[Math.max(0, _findIndex)];
     if (!m) return false;
@@ -646,11 +670,14 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     editor.value = left + replacement + right;
     current = String(editor.value || "");
     const caret = left.length + replacement.length;
-    editor.focus();
-    editor.setSelectionRange(caret, caret);
+    if (!hadFindFocus) editor.setSelectionRange(caret, caret);
     scheduleLineNumbersRefresh(editor, cardEl?.querySelector("[data-lines]"));
     _scheduleFindRebuild(cardEl);
     _updateEditorStatus(cardEl);
+    if (hadFindFocus) {
+      const findInput = cardEl?.querySelector("[data-find-input]");
+      if (findInput) findInput.focus({ preventScroll: true });
+    }
     return true;
   }
 
@@ -701,6 +728,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   function _selectFindMatchByIndex(cardEl, nextIndex) {
     const editor = cardEl?.querySelector("[data-editor]");
     const overlayContent = cardEl?.querySelector("[data-find-overlay-content]");
+    const hadFindFocus = _findBarHasFocus(cardEl);
     if (!editor || !_findMatches.length) {
       _syncFindStatus(cardEl);
       return false;
@@ -709,15 +737,18 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     const total = _findMatches.length;
     _findIndex = ((nextIndex % total) + total) % total;
     const m = _findMatches[_findIndex];
-    editor.focus();
-    editor.setSelectionRange(m.start, m.end);
+    if (!hadFindFocus) editor.setSelectionRange(m.start, m.end);
 
     if (overlayContent) {
       const marks = overlayContent.querySelectorAll("mark.findMatch");
       marks.forEach((el, i) => el.classList.toggle("findMatchActive", i == _findIndex));
     }
 
-    _scrollFindOverlayWithEditor(cardEl);
+    _scrollEditorToMatch(cardEl, m);
+    if (hadFindFocus) {
+      const findInput = cardEl?.querySelector("[data-find-input]");
+      if (findInput) findInput.focus({ preventScroll: true });
+    }
     _syncFindStatus(cardEl);
     return true;
   }
@@ -1049,6 +1080,8 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   });
 
   card.querySelector("[data-editor]")?.addEventListener("keydown", (e) => {
+    const findBar = card.querySelector("[data-findbar]");
+    if (findBar && findBar.contains(document.activeElement)) return;
     if ((e.ctrlKey || e.metaKey) && String(e.key || "").toLowerCase() === "f") {
       e.preventDefault();
       if (!editing) return;
@@ -1057,7 +1090,6 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
       return;
     }
     if (String(e.key || "") === "Escape") {
-      const findBar = card.querySelector("[data-findbar]");
       if (_findOpen && findBar && !findBar.hidden) {
         e.preventDefault();
         closeFindBar(card, true);
@@ -1084,6 +1116,7 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
   });
 
   card.querySelector("[data-find-input]")?.addEventListener("keydown", (e) => {
+    e.stopPropagation();
     if (String(e.key || "") === "Escape") {
       e.preventDefault();
       closeFindBar(card, true);
@@ -1095,7 +1128,37 @@ function makeFileCard({ absPath, relPath, ext, sizeBytes, content }) {
     }
   });
 
-  card.querySelector("[data-find-input]")?.addEventListener("input", () => {
+  card.querySelector("[data-find-input]")?.addEventListener("input", (e) => {
+    e.stopPropagation();
+    if (!_findOpen) return;
+    _scheduleFindRebuild(card);
+  });
+
+  card.querySelector("[data-replace-input]")?.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+  });
+
+  card.querySelector("[data-replace-input]")?.addEventListener("input", (e) => {
+    e.stopPropagation();
+  });
+
+  card.querySelector("[data-replace-next]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    _replaceCurrentFind(card);
+  });
+
+  card.querySelector("[data-replace-all]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const total = _replaceAllFind(card);
+    if (total > 0) addLog(`[FILE_EDIT] Replaced ${total} match(es) in ${relPath || absPath}`);
+  });
+
+  card.querySelector("[data-find-case]")?.addEventListener("change", () => {
+    if (!_findOpen) return;
+    _scheduleFindRebuild(card);
+  });
+
+  card.querySelector("[data-find-word]")?.addEventListener("change", () => {
     if (!_findOpen) return;
     _scheduleFindRebuild(card);
   });

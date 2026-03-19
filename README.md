@@ -96,4 +96,4 @@ applying changes to critical projects.
 
 ## 📄 License
 
-MIT (or specify your chosen license)
+MIT

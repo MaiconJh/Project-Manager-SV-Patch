@@ -1,4 +1,4 @@
-// @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback electron-cache-path-hardening.
+// @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback.
 const { app, BrowserWindow, dialog, ipcMain, clipboard } = require("electron");
 const path = require("path");
 const fs = require("fs");

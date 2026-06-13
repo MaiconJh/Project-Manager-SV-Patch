@@ -1,4 +1,4 @@
-// @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback ui-diagnostics preset-ui-fix safe-bind tree-scroll-preserve files-header-sticky breadcrumb kb-nav hit-test bind-guard bind-singularity fatal-hooks.
+// @context: export-preset-file save-dialog open-dialog apply-rehydrate feedback ui-diagnostics preset-ui-fix safe-bind.
 /*
 PM-SV-PATCH META
 Version: pm-svpatch-ui@2026.02.11-r1
@@ -16,16 +16,6 @@ const el = (id) => document.getElementById(id);
 
 const __PM_UI_DEV__ = !process?.env || process.env.NODE_ENV !== "production";
 const __PM_UI_TRACE_CLICKS__ = __PM_UI_DEV__ && process?.env?.PM_UI_TRACE_CLICKS === "1";
-
-if (!window.__uiFatalHooksInstalled) {
-  window.__uiFatalHooksInstalled = true;
-  window.addEventListener("error", (e) => {
-    console.error("[UI FATAL]", e?.message, e?.error);
-  });
-  window.addEventListener("unhandledrejection", (e) => {
-    console.error("[UI FATAL PROMISE]", e?.reason);
-  });
-}
 const __UI_BIND_EXPECTED_BUTTON_IDS__ = [
   "btnOpen",
   "btnRefreshFiles",
@@ -62,7 +52,6 @@ function _bindClickSafe(id, handler, opts = {}) {
   if (!node) {
     if (opts.required !== false) {
       __UI_BIND_METRICS__.missingDom.add(id);
-      console.error("[UI] Missing element:", id);
       _reportUiBindingIssue(`Missing UI element: #${id}`);
     }
     return;
@@ -73,57 +62,15 @@ function _bindClickSafe(id, handler, opts = {}) {
     return;
   }
   __UI_BIND_METRICS__.wired.add(id);
-  node.addEventListener("click", (ev) => {
-    Promise.resolve()
-      .then(() => handler(ev))
-      .catch((e) => {
-        console.error("[UI] Handler failed:", id, e);
-        _reportUiBindingIssue(`Action failed (${id})`);
-        _uiDevLog(`click handler failed: #${id}`, e);
-        showToast(`Action failed (${id})`, { type: "error", ttl: 2600 });
-      });
+  node.addEventListener("click", async (ev) => {
+    try {
+      await handler(ev);
+    } catch (e) {
+      _reportUiBindingIssue(`Action failed (${id})`);
+      _uiDevLog(`click handler failed: #${id}`, e);
+      showToast(`Action failed (${id})`, { type: "error", ttl: 2600 });
+    }
   });
-}
-
-function _uiHitTestAtCenter(node) {
-  if (!node || typeof node.getBoundingClientRect !== "function") return null;
-  const r = node.getBoundingClientRect();
-  const cx = Math.max(0, Math.min(window.innerWidth - 1, Math.floor(r.left + Math.max(1, r.width) / 2)));
-  const cy = Math.max(0, Math.min(window.innerHeight - 1, Math.floor(r.top + Math.max(1, r.height) / 2)));
-  const top = document.elementFromPoint(cx, cy);
-  return { cx, cy, top };
-}
-
-function _diagWhyNotClickable(node, id) {
-  if (!__PM_UI_DEV__) return;
-  if (!node) {
-    console.error(`[UI][HitTest] ${id}: missing node`);
-    return;
-  }
-  const hit = _uiHitTestAtCenter(node);
-  const top = hit?.top || null;
-  const ncs = getComputedStyle(node);
-  const parent = node.closest(".panelHead, .panelTitleRow, .presetQuick") || node.parentElement;
-  const pcs = parent ? getComputedStyle(parent) : null;
-  const tcs = top ? getComputedStyle(top) : null;
-  const blocked = top && top !== node && !node.contains(top);
-  if (!blocked) {
-    console.info(`[UI][HitTest] ${id}: OK`);
-    return;
-  }
-  console.warn(`[UI][HitTest] ${id}: BLOCKED by ${top?.id ? '#'+top.id : top?.tagName}`, {
-    node: { pointerEvents: ncs.pointerEvents, zIndex: ncs.zIndex, visibility: ncs.visibility, display: ncs.display, opacity: ncs.opacity },
-    parent: parent ? { pointerEvents: pcs.pointerEvents, zIndex: pcs.zIndex, visibility: pcs.visibility, display: pcs.display, opacity: pcs.opacity } : null,
-    top: tcs ? { pointerEvents: tcs.pointerEvents, zIndex: tcs.zIndex, visibility: tcs.visibility, display: tcs.display, opacity: tcs.opacity } : null,
-    point: { x: hit?.cx, y: hit?.cy },
-  });
-}
-
-function _runUiGlobalHitTestReport() {
-  if (!__PM_UI_DEV__) return;
-  if (process?.env?.PM_UI_DIAG_HITTEST !== "1") return;
-  const ids = ["btnOpen", "btnRefreshFiles", "btnExportPrimary", "btnPresetMenu", "presetMenuSave", "presetMenuImport"];
-  for (const id of ids) _diagWhyNotClickable(el(id), id);
 }
 
 function _reportUiBindHealth() {
@@ -137,7 +84,7 @@ function _reportUiBindHealth() {
     }
     const wiredCount = __UI_BIND_METRICS__.wired.size;
     const missingCount = __UI_BIND_METRICS__.missingDom.size + __UI_BIND_METRICS__.missingHandler.size;
-    console.info("[UI] bind complete:", { wired: wiredCount, missing: missingCount });
+    console.log(`[UI] bind complete: ${wiredCount} buttons wired, ${missingCount} missing`);
     if (__UI_BIND_METRICS__.missingDom.size) {
       console.error(`[UI] bind missing DOM IDs: ${Array.from(__UI_BIND_METRICS__.missingDom).join(", ")}`);
     }
@@ -193,9 +140,6 @@ const _exportPresetState = {
 };
 
 const _stateUpdateWaiters = [];
-const _presetMenuState = {
-  open: false,
-};
 
 
 const _applyDiffState = {
@@ -2265,6 +2209,976 @@ function _sanitizeExportProfileForPreset(profile) {
   }
   return p;
 }
+function syncExpandedIdsFromPaths(tree){
+  try{
+    expanded.clear();
+    const walk = (n)=>{
+      if(!n) return;
+      if(n.isDir && expandedPaths.has(_normalizeAbsPath(n.absPath))) expanded.add(n.id);
+      if(n.children && n.children.length) n.children.forEach(walk);
+    };
+    walk(tree);
+  }catch{}
+}
+
+function _cleanupExpandedPathsFromTree(tree){
+  try{
+    const dirSet = new Set();
+    const walk = (n)=>{
+      if(!n) return;
+      if(n.isDir) dirSet.add(_normalizeAbsPath(n.absPath));
+      if(n.children && n.children.length) n.children.forEach(walk);
+    };
+    walk(tree);
+    for(const p of Array.from(expandedPaths)){
+      if(!dirSet.has(_normalizeAbsPath(p))) expandedPaths.delete(p);
+    }
+  }catch{}
+}
+
+async function _awaitStateUpdateOnce(timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      resolve({ ok: false, timeout: true });
+    }, Math.max(100, Number(timeoutMs || 0)));
+    _stateUpdateWaiters.push((snapshot) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ ok: true, snapshot });
+    });
+  });
+}
+
+async function _applyHiddenPathsFromPreset(snapshot, presetHiddenPaths) {
+  const idxRaw = _collectSnapshotPathIndex(snapshot || {});
+  const idx = {
+    all: idxRaw?.all instanceof Set ? idxRaw.all : new Set(),
+    actualByNorm: idxRaw?.actualByNorm instanceof Map ? idxRaw.actualByNorm : new Map(),
+    ignoredSet: new Set(Array.isArray(snapshot?.ignored) ? snapshot.ignored.map((p) => _normalizeAbsPath(p)) : []),
+  };
+  const requestedHidden = _normalizePathList(presetHiddenPaths || [], snapshot?.projectPath || "");
+  const hiddenToRestore = [];
+  for (const hp of requestedHidden) {
+    if (!hp || !idx.all.has(hp)) continue;
+    const actual = idx.actualByNorm.get(hp) || hp;
+    hiddenToRestore.push(actual);
+  }
+
+  await ipcRenderer.invoke("tree:clearIgnored");
+  for (const hp of hiddenToRestore) {
+    await ipcRenderer.invoke("tree:toggleIgnored", hp);
+  }
+
+  const stateAck = await _awaitStateUpdateOnce(1500);
+  if (stateAck.ok && stateAck.snapshot) {
+    lastSnapshot = stateAck.snapshot;
+  } else if (snapshot && typeof snapshot === "object") {
+    snapshot.ignored = hiddenToRestore.slice();
+  }
+
+  return {
+    requestedHidden,
+    hiddenToRestore,
+    applied: hiddenToRestore.length,
+    requested: requestedHidden.length,
+    missing: Math.max(0, requestedHidden.length - hiddenToRestore.length),
+    stateConfirmed: Boolean(stateAck.ok),
+    snapshot: stateAck.snapshot || snapshot,
+  };
+}
+
+function _validatePresetV1(presetObj, snapshot) {
+  if (!presetObj || typeof presetObj !== "object") return { ok: false, error: "Preset JSON must be an object" };
+  if (presetObj.schema_version !== "preset.v1") return { ok: false, error: "Invalid schema_version (expected preset.v1)" };
+  if (!snapshot?.projectPath) return { ok: false, error: "No active project" };
+  if (String(presetObj.project_root || "") !== String(snapshot.projectPath || "")) {
+    return { ok: false, error: "Preset belongs to another project", mismatch: true };
+  }
+  if (!presetObj.export || typeof presetObj.export !== "object") return { ok: false, error: "Missing export section" };
+  return { ok: true };
+}
+
+function _classifyPresetApplyHealth(snapshot, requestedSelection, requestedHidden) {
+  const idx = _collectSnapshotPathIndex(snapshot || {});
+  const reqSel = _normalizePathList(requestedSelection || []);
+  const reqHidden = _normalizePathList(requestedHidden || []);
+  let selResolved = 0;
+  let selMissing = 0;
+  for (const p of reqSel) {
+    if (idx.all.has(p)) selResolved += 1;
+    else selMissing += 1;
+  }
+  let hiddenResolved = 0;
+  let hiddenMissing = 0;
+  for (const p of reqHidden) {
+    if (idx.all.has(p)) hiddenResolved += 1;
+    else hiddenMissing += 1;
+  }
+  const requestedTotal = reqSel.length + reqHidden.length;
+  const resolvedTotal = selResolved + hiddenResolved;
+  const missing = selMissing + hiddenMissing;
+  let status = "OK";
+  if (missing > 0) status = resolvedTotal > 0 || requestedTotal === 0 ? "PARTIAL" : "BROKEN";
+  return { status, missing, hiddenResolved, hiddenRequested: reqHidden.length, selResolved, selRequested: reqSel.length };
+}
+
+function _applyExportProfileToUi(profile) {
+  if (!profile || typeof profile !== "object") return;
+  _exportUi.type = profile.format === "json" ? "json" : "txt";
+  _exportUi.contentLevel = profile.content_level === "compact" ? "compact" : "full";
+  _exportUi.options.treeHeader = Boolean(profile.include_tree);
+  _exportUi.options.ignoredSummary = Boolean(profile.include_ignored_summary);
+  _exportUi.options.hashes = Boolean(profile.include_hashes);
+  _exportUi.options.sortDet = profile.sort_mode !== "alpha";
+  _syncExportUiControls();
+  _saveExportUiConfig();
+}
+
+async function _applyPresetV1(snapshot, presetObj) {
+  const token = ++_exportPresetState.applyToken;
+  _exportPresetState.applying = true;
+  _setPresetActionButtonsBusy(true);
+  _setPresetFeedbackTimed("Applying preset… Loading…", "loading");
+
+  try {
+    const valid = _validatePresetV1(presetObj, snapshot);
+    if (!valid.ok) {
+      _setPresetFeedbackTimed(`Error: ${valid.error}`, valid.mismatch ? "broken" : "error", 5200);
+      try { addLog(`[PRESET] import rejected: ${valid.error}`); } catch {}
+      return;
+    }
+
+    const idxRaw = _collectSnapshotPathIndex(snapshot || {});
+    const idx = {
+      all: idxRaw?.all instanceof Set ? idxRaw.all : new Set(),
+      dirs: idxRaw?.dirs instanceof Set ? idxRaw.dirs : new Set(),
+    };
+    if (__PM_UI_DEV__ && !(idxRaw?.dirs instanceof Set)) {
+      console.error("[PRESET] idx.dirs missing before apply", typeof idxRaw?.dirs, idxRaw?.dirs);
+    }
+
+    const expandedSrc = Array.isArray(presetObj?.tree?.expanded_paths) ? presetObj.tree.expanded_paths : [];
+    expandedPaths.clear();
+    for (const ep of expandedSrc) {
+      const p = _normalizeAbsPath(ep);
+      if (p && idx.dirs.has(p)) expandedPaths.add(p);
+    }
+
+    const requestedSelection = _normalizePathList(presetObj?.export?.scope?.selected || [], snapshot?.projectPath || "");
+    const requestedHidden = _normalizePathList(presetObj?.export?.hidden_paths || [], snapshot?.projectPath || "");
+    _exportSelectionState.selectedMode = presetObj?.export?.scope?.mode === "selected" ? "selected" : "all";
+
+    _setPresetFeedbackTimed("Applying hidden paths…", "loading");
+    let hiddenResult = { requestedHidden, hiddenToRestore: [], applied: 0, requested: requestedHidden.length, missing: requestedHidden.length, stateConfirmed: true, snapshot };
+    try {
+      hiddenResult = await _applyHiddenPathsFromPreset(snapshot, requestedHidden);
+      snapshot = hiddenResult.snapshot || snapshot;
+      if (__PM_UI_DEV__) console.log(`[PRESET] hidden apply ${hiddenResult.applied}/${hiddenResult.requested} confirmed=${hiddenResult.stateConfirmed}`);
+    } catch (hiddenErr) {
+      if (__PM_UI_DEV__) console.error("[PRESET] hidden restore failed", hiddenErr);
+      hiddenResult.stateConfirmed = false;
+    }
+
+    if (token !== _exportPresetState.applyToken) return;
+
+    if (!(_exportSelectionState.selected instanceof Set)) _exportSelectionState.selected = new Set();
+    _exportSelectionState.selected.clear();
+    for (const p0 of requestedSelection) {
+      const p = _normalizeAbsPath(p0);
+      if (!p || !idx.all.has(p)) continue;
+      _exportSelectionState.selected.add(p);
+      if (idx.dirs.has(p)) {
+        const descendants = _collectDescendantsFromSnapshot(snapshot, p);
+        for (const d of descendants) {
+          const dn = _normalizeAbsPath(d);
+          if (idx.all.has(dn)) _exportSelectionState.selected.add(dn);
+        }
+      }
+    }
+
+    const presetProfile = { ...(presetObj?.export?.profile || {}) };
+    if (!Object.prototype.hasOwnProperty.call(presetProfile, "schema_version") && Object.prototype.hasOwnProperty.call(presetProfile, "export_schema_version")) {
+      presetProfile.schema_version = presetProfile.export_schema_version;
+    }
+    _applyExportProfileToUi(presetProfile);
+
+    const mainChk = el("chkExportSelectedOnly");
+    const tabChk = el("chkExportSelectedOnlyTab");
+    const isSel = _exportSelectionState.selectedMode === "selected";
+    if (mainChk) mainChk.checked = isSel;
+    if (tabChk) tabChk.checked = isSel;
+
+    render(snapshot);
+    _updateExportSelectionMeta(snapshot);
+    if (snapshot?.projectPath) _writeExportSelectionConfig(snapshot);
+
+    const h = _classifyPresetApplyHealth(snapshot, requestedSelection, requestedHidden);
+    if (!hiddenResult.stateConfirmed && h.status === "OK") h.status = "PARTIAL";
+    _exportPresetState.lastHealth = String(h.status || "OK").toLowerCase();
+    const mode = h.status === "OK" ? "ok" : (h.status === "PARTIAL" ? "partial" : "broken");
+    const confirmSuffix = hiddenResult.stateConfirmed ? "" : " (ignored state not confirmed)";
+    _setPresetFeedbackTimed(`Applied preset: ${h.status} (hidden restored ${h.hiddenResolved}/${h.hiddenRequested})${confirmSuffix}`, mode, 5200);
+    try { addLog(`[PRESET] applied: ${h.status} missing=${h.missing} hidden=${h.hiddenResolved}/${h.hiddenRequested} confirmed=${hiddenResult.stateConfirmed}`); } catch {}
+  } catch (e) {
+    _setPresetFeedbackTimed(`Error: ${e?.message || e}`, "error", 5200);
+    try { addLog(`[PRESET] apply error: ${e?.message || e}`); } catch {}
+  } finally {
+    if (token === _exportPresetState.applyToken) {
+      _exportPresetState.applying = false;
+      _setPresetActionButtonsBusy(false);
+    }
+  }
+}
+
+async function _savePresetToFile(snapshot) {
+  if (!snapshot?.projectPath) {
+    _setPresetFeedbackTimed("Error: open a project first", "error", 4200);
+    return;
+  }
+  _setPresetActionButtonsBusy(true);
+  _setPresetFeedbackTimed("Saving preset…", "loading");
+  try {
+    const preset = _buildPresetV1(snapshot);
+    const payload = {
+      suggestedName: _defaultPresetName(),
+      projectRoot: String(snapshot.projectPath || ""),
+      presetJsonString: JSON.stringify(preset, null, 2),
+    };
+    const res = await ipcRenderer.invoke("preset:saveAs", payload);
+    if (res?.canceled) {
+      _setPresetFeedbackTimed("Canceled", "cancel", 2800);
+      try { addLog("[PRESET] save canceled"); } catch {}
+      return;
+    }
+    if (!res?.ok) {
+      _setPresetFeedbackTimed(`Error: ${res?.error || "save failed"}`, "error", 5200);
+      try { addLog(`[PRESET] save error: ${res?.error || "save failed"}`); } catch {}
+      return;
+    }
+    _exportPresetState.lastPresetPath = String(res.path || "");
+    _setPresetFeedbackTimed(`Saved: ${path.basename(String(res.path || "preset"))} (hidden: ${preset.export.hidden_paths.length}, selected: ${preset.export.scope.selected.length})`, "ok", 4200);
+    try { addLog(`[PRESET] saved: ${res.path}`); } catch {}
+  } catch (e) {
+    _setPresetFeedbackTimed(`Error: ${e?.message || e}`, "error", 5200);
+  } finally {
+    _setPresetActionButtonsBusy(false);
+  }
+}
+
+async function _importPresetFromFile(snapshot) {
+  if (!snapshot?.projectPath) {
+    _setPresetFeedbackTimed("Error: open a project first", "error", 4200);
+    return;
+  }
+  _setPresetActionButtonsBusy(true);
+  _setPresetFeedbackTimed("Importing preset…", "loading");
+  try {
+    const res = await ipcRenderer.invoke("preset:open", { projectRoot: String(snapshot.projectPath || "") });
+    if (res?.canceled) {
+      _setPresetFeedbackTimed("Canceled", "cancel", 2800);
+      try { addLog("[PRESET] import canceled"); } catch {}
+      return;
+    }
+    if (!res?.ok) {
+      _setPresetFeedbackTimed(`Error: ${res?.error || "import failed"}`, "error", 5200);
+      try { addLog(`[PRESET] import error: ${res?.error || "import failed"}`); } catch {}
+      return;
+    }
+
+    let parsed = null;
+    try { parsed = JSON.parse(String(res.contents || "")); }
+    catch (e) {
+      _setPresetFeedbackTimed(`Error: invalid JSON (${e?.message || e})`, "error", 5200);
+      try { addLog(`[PRESET] invalid JSON: ${e?.message || e}`); } catch {}
+      return;
+    }
+
+    _exportPresetState.lastPresetPath = String(res.path || "");
+    _setPresetFeedbackTimed(`Imported: ${path.basename(String(res.path || "preset"))}`, "ok", 2200);
+    await _applyPresetV1(snapshot, parsed);
+  } catch (e) {
+    _setPresetFeedbackTimed(`Error: ${e?.message || e}`, "error", 5200);
+  } finally {
+    _setPresetActionButtonsBusy(false);
+  }
+}
+
+
+function _syncExportUiControls() {
+  const typeTxt = el("btnExportTypeTxt");
+  const typeJson = el("btnExportTypeJson");
+  if (typeTxt) typeTxt.classList.toggle("active", _exportUi.type === "txt");
+  if (typeJson) typeJson.classList.toggle("active", _exportUi.type === "json");
+
+  const cCompact = el("btnContentCompact");
+  const cStandard = el("btnContentStandard");
+  const cFull = el("btnContentFull");
+  if (cCompact) cCompact.classList.toggle("active", _exportUi.contentLevel === "compact");
+  if (cStandard) cStandard.classList.toggle("active", _exportUi.contentLevel === "standard");
+  if (cFull) cFull.classList.toggle("active", _exportUi.contentLevel === "full");
+
+  const oTree = el("optTreeHeader");
+  const oIgnored = el("optIgnoredSummary");
+  const oHashes = el("optHashes");
+  const oSort = el("optSortDet");
+  if (oTree) oTree.checked = Boolean(_exportUi.options.treeHeader);
+  if (oIgnored) oIgnored.checked = Boolean(_exportUi.options.ignoredSummary);
+  if (oHashes) oHashes.checked = Boolean(_exportUi.options.hashes);
+  if (oSort) oSort.checked = Boolean(_exportUi.options.sortDet);
+}
+
+function _updateExportLiveSummary(snapshot) {
+  const elSum = el("exportLiveSummary");
+  if (!elSum) return;
+  const activeSnapshot = snapshot || lastSnapshot || {};
+  const profile = _buildExportProfile();
+  const mode = profile.scope === "selected" ? "Selected" : "All";
+  const selected = _exportSelectionState.selected.size;
+  const resolvedSet = profile.scope === "selected"
+    ? _collectExportableFromSelection(activeSnapshot)
+    : _collectExportableAll(activeSnapshot);
+  const resolvedAbs = Array.from(resolvedSet || []);
+  const resolved = resolvedAbs.length;
+
+  _scheduleExportSizeRecalc(activeSnapshot, profile, resolvedAbs);
+
+  const showBytes = _exportSizeState.status === "ready"
+    ? _exportSizeState.bytes
+    : (_exportSizeState.status === "error" ? _exportSizeState.lastStableBytes : null);
+  const sizeText = _formatArchiveSizeText(_exportSizeState.status, showBytes, _exportSizeState.status === "error");
+  elSum.textContent = `Mode: ${mode} · Selected: ${selected} · Resolved files: ${resolved} · Format: ${String(profile.format || "txt").toUpperCase()} · Tree: ${profile.include_tree ? "yes" : "no"} · Export archive size: ${sizeText}`;
+}
+
+async function _runExportByType(type) {
+  const t = String(type || _exportUi.type || "txt").toLowerCase();
+  if (t === "json") {
+    showToast("Exporting JSON…", { type: "info", ttl: 1800 });
+    await ipcRenderer.invoke("export:json");
+    return;
+  }
+  showToast("Exporting TXT…", { type: "info", ttl: 1800 });
+  await ipcRenderer.invoke("export:txt");
+}
+
+function _normalizeAbsPath(p) {
+  return String(p || "").replaceAll("\\", "/");
+}
+
+function _isSelectedPath(absPath) {
+  const p = _normalizeAbsPath(absPath);
+  return _exportSelectionState.selected.has(p);
+}
+
+function _toggleSelectedPath(absPath) {
+  const p = _normalizeAbsPath(absPath);
+  if (!p) return;
+  if (_exportSelectionState.selected.has(p)) _exportSelectionState.selected.delete(p);
+  else _exportSelectionState.selected.add(p);
+}
+
+function _collectDescendantsFromSnapshot(snapshot, folderPathNormalized) {
+  const out = [];
+  if (!snapshot?.tree || !folderPathNormalized) return out;
+
+  let target = null;
+  const walkFind = (node) => {
+    if (!node || target) return;
+    if (_normalizeAbsPath(node.absPath) === folderPathNormalized) {
+      target = node;
+      return;
+    }
+    for (const ch of node.children || []) walkFind(ch);
+  };
+  walkFind(snapshot.tree);
+  if (!target) return out;
+
+  const walkDesc = (node) => {
+    if (!node) return;
+    for (const ch of node.children || []) {
+      out.push(_normalizeAbsPath(ch.absPath));
+      walkDesc(ch);
+    }
+  };
+  walkDesc(target);
+  return out;
+}
+
+function _collectSnapshotPathIndex(snapshot) {
+  const all = new Set();
+  const dirs = new Set();
+  const actualByNorm = new Map();
+  const walk = (node) => {
+    if (!node) return;
+    const actual = String(node.absPath || "");
+    const normalized = _normalizeAbsPath(actual);
+    all.add(normalized);
+    if (!actualByNorm.has(normalized)) actualByNorm.set(normalized, actual);
+    if (node.isDir || (Array.isArray(node.children) && node.children.length >= 0)) dirs.add(normalized);
+    for (const ch of node.children || []) walk(ch);
+  };
+  walk(snapshot?.tree || null);
+  return { all, dirs, actualByNorm };
+}
+
+function _applyFolderSelection(selectedSet, folderPathNormalized, isSelecting, descendantsList) {
+  if (!selectedSet || !folderPathNormalized) return;
+  const all = [folderPathNormalized, ...(descendantsList || [])];
+  if (isSelecting) {
+    for (const p of all) selectedSet.add(_normalizeAbsPath(p));
+  } else {
+    for (const p of all) selectedSet.delete(_normalizeAbsPath(p));
+  }
+}
+
+function _cleanupSelectionWithSnapshot(snapshot) {
+  try {
+    if (!snapshot?.projectPath) {
+      _exportSelectionState.selected.clear();
+      return;
+    }
+    const indexSet = new Set();
+    const walk = (node) => {
+      if (!node) return;
+      indexSet.add(_normalizeAbsPath(node.absPath));
+      if (Array.isArray(node.children)) node.children.forEach(walk);
+    };
+    walk(snapshot.tree);
+    const next = new Set();
+    for (const p of _exportSelectionState.selected) {
+      const pn = _normalizeAbsPath(p);
+      if (indexSet.has(pn)) next.add(pn);
+    }
+    _exportSelectionState.selected = next;
+  } catch {}
+}
+
+function _collectExportableFromSelection(snapshot) {
+  const ignoredSet = new Set(snapshot?.ignored || []);
+  const fileRows = [];
+  const walk = (n) => {
+    if (!n) return;
+    if (!n.isDir) {
+      fileRows.push({ absPath: String(n.absPath || "") });
+      return;
+    }
+    for (const ch of n.children || []) walk(ch);
+  };
+  walk(snapshot?.tree);
+  const out = new Set();
+  const selected = _exportSelectionState.selected;
+  const normSel = Array.from(selected).map((p) => _normalizeAbsPath(p));
+
+  for (const r of fileRows) {
+    if (ignoredSet.has(r.absPath)) continue;
+    const ext = path.extname(String(r.absPath || "")) || "";
+    if (DEFAULT_IGNORE_EXTS && DEFAULT_IGNORE_EXTS.has && DEFAULT_IGNORE_EXTS.has(ext)) continue;
+    const rp = _normalizeAbsPath(r.absPath);
+    let picked = selected.has(rp);
+    if (!picked) {
+      for (const s of normSel) {
+        if (!s) continue;
+        if (rp === s || rp.startsWith(s.endsWith("/") ? s : s + "/")) {
+          picked = true;
+          break;
+        }
+      }
+    }
+    if (picked) out.add(rp);
+  }
+  return out;
+}
+
+function _countExportableAll(snapshot) {
+  const ignoredSet = new Set(snapshot?.ignored || []);
+  let count = 0;
+  const walk = (n) => {
+    if (!n) return;
+    if (!n.isDir) {
+      const abs = String(n.absPath || "");
+      if (!ignoredSet.has(abs)) {
+        const ext = path.extname(abs) || "";
+        if (!(DEFAULT_IGNORE_EXTS && DEFAULT_IGNORE_EXTS.has && DEFAULT_IGNORE_EXTS.has(ext))) count += 1;
+      }
+      return;
+    }
+    for (const ch of n.children || []) walk(ch);
+  };
+  walk(snapshot?.tree);
+  return count;
+}
+
+function _collectExportableAll(snapshot) {
+  const ignoredSet = new Set(snapshot?.ignored || []);
+  const out = new Set();
+  const walk = (n) => {
+    if (!n) return;
+    if (!n.isDir) {
+      const abs = String(n.absPath || "");
+      if (!ignoredSet.has(abs)) {
+        const ext = path.extname(abs) || "";
+        if (!(DEFAULT_IGNORE_EXTS && DEFAULT_IGNORE_EXTS.has && DEFAULT_IGNORE_EXTS.has(ext))) {
+          out.add(_normalizeAbsPath(abs));
+        }
+      }
+      return;
+    }
+    for (const ch of n.children || []) walk(ch);
+  };
+  walk(snapshot?.tree);
+  return out;
+}
+
+function _safeRelForExport(root, abs) {
+  try {
+    return String(path.relative(String(root || ""), String(abs || "")) || path.basename(String(abs || ""))).replaceAll("\\", "/");
+  } catch {
+    return String(abs || "").replaceAll("\\", "/");
+  }
+}
+
+function _hashStable(input) {
+  try {
+    return crypto.createHash("sha1").update(String(input || ""), "utf8").digest("hex");
+  } catch {
+    return String(input || "");
+  }
+}
+
+function _buildExportSizeKey(snapshot, profile, resolvedAbs) {
+  const root = String(snapshot?.projectPath || "");
+  const rels = (resolvedAbs || []).map((p) => _safeRelForExport(root, p)).sort((a, b) => a.localeCompare(b));
+  const stats = snapshot?.stats || {};
+  const sigObj = {
+    root,
+    format: profile?.format || "txt",
+    scope: profile?.scope || "all",
+    content_level: profile?.content_level || "full",
+    include_tree: Boolean(profile?.include_tree),
+    include_hashes: Boolean(profile?.include_hashes),
+    include_ignored_summary: Boolean(profile?.include_ignored_summary),
+    sort_mode: profile?.sort_mode || "dir_first_alpha",
+    selected_count: _exportSelectionState.selected.size,
+    stats: {
+      files: Number(stats.files || 0),
+      folders: Number(stats.folders || 0),
+      ignoredFiles: Number(stats.ignoredFiles || 0),
+      ignoredFolders: Number(stats.ignoredFolders || 0),
+    },
+    rels,
+  };
+  return _hashStable(JSON.stringify(sigObj));
+}
+
+function _treeAddExportFile(root, relPath, fileIndex) {
+  const parts = String(relPath || "").split("/").filter(Boolean);
+  let cur = root;
+  for (let i = 0; i < parts.length; i++) {
+    const name = parts[i];
+    const isLast = i === parts.length - 1;
+    const pathRel = parts.slice(0, i + 1).join("/");
+    if (isLast) {
+      cur.children.push({ type: "file", name, path: pathRel, file_index: fileIndex });
+      return;
+    }
+    let next = cur.children.find((c) => c.type === "dir" && c.name === name);
+    if (!next) {
+      next = { type: "dir", name, path: pathRel, children: [] };
+      cur.children.push(next);
+    }
+    cur = next;
+  }
+}
+
+function _sortExportTree(node, sortMode = "dir_first_alpha") {
+  if (!node || !Array.isArray(node.children)) return;
+  for (const ch of node.children) _sortExportTree(ch, sortMode);
+  node.children.sort((a, b) => {
+    if (sortMode === "dir_first_alpha") {
+      const ta = a.type === "dir" ? 0 : 1;
+      const tb = b.type === "dir" ? 0 : 1;
+      if (ta !== tb) return ta - tb;
+    }
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
+}
+
+async function _readFileForExport(absPath, includeContent, includeHashes) {
+  let st = null;
+  try { st = await fs.promises.stat(absPath); } catch {}
+  const sizeBytes = Number(st?.size || 0);
+  const mtimeMs = Number.isFinite(Number(st?.mtimeMs)) ? Number(st.mtimeMs) : null;
+  if (!includeContent && !includeHashes) {
+    return {
+      size_bytes: sizeBytes,
+      mtime_ms: mtimeMs,
+      encoding: null,
+      line_count: null,
+      sha256: null,
+      content: null,
+      content_error: null,
+    };
+  }
+
+  try {
+    const buf = await fs.promises.readFile(absPath);
+    for (let i = 0; i < Math.min(buf.length, 4096); i++) {
+      if (buf[i] === 0) {
+        return {
+          size_bytes: sizeBytes,
+          mtime_ms: mtimeMs,
+          encoding: includeContent ? null : null,
+          line_count: includeContent ? null : null,
+          sha256: includeHashes ? null : null,
+          content: includeContent ? null : null,
+          content_error: includeContent ? "binary_or_decode_failed" : null,
+        };
+      }
+    }
+    const dec = new TextDecoder("utf-8", { fatal: true });
+    const content = dec.decode(buf);
+    const lineCount = content.length ? content.split(/\r?\n/).length : 0;
+    const hash = includeHashes ? crypto.createHash("sha256").update(String(content), "utf8").digest("hex") : null;
+    return {
+      size_bytes: sizeBytes,
+      mtime_ms: mtimeMs,
+      encoding: includeContent ? "utf-8" : null,
+      line_count: includeContent ? lineCount : null,
+      sha256: hash,
+      content: includeContent ? content : null,
+      content_error: includeContent ? null : null,
+    };
+  } catch {
+    return {
+      size_bytes: sizeBytes,
+      mtime_ms: mtimeMs,
+      encoding: includeContent ? null : null,
+      line_count: includeContent ? null : null,
+      sha256: includeHashes ? null : null,
+      content: includeContent ? null : null,
+      content_error: includeContent ? "binary_or_decode_failed" : null,
+    };
+  }
+}
+
+async function _buildUnifiedReportForSize(snapshot, profile, resolvedAbs) {
+  const root = String(snapshot?.projectPath || "");
+  const ignored = Array.from(new Set(snapshot?.ignored || []))
+    .map((p) => _safeRelForExport(root, p))
+    .sort((a, b) => a.localeCompare(b));
+  const includeContent = profile.content_level !== "compact";
+  const includeHashes = Boolean(profile.include_hashes);
+  const absList = Array.from(new Set(resolvedAbs || [])).sort((a, b) => a.localeCompare(b));
+  const files = [];
+
+  for (let i = 0; i < absList.length; i++) {
+    const absPath = absList[i];
+    const meta = await _readFileForExport(absPath, includeContent, includeHashes);
+    const relPath = _safeRelForExport(root, absPath);
+    files.push({
+      path: relPath,
+      ext: path.extname(relPath) || "",
+      size_bytes: meta.size_bytes,
+      mtime_ms: meta.mtime_ms,
+      encoding: meta.encoding,
+      line_count: meta.line_count,
+      sha256: meta.sha256,
+      content: meta.content,
+      content_error: meta.content_error,
+    });
+    if (i % 40 === 0) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  files.sort((a, b) => String(a.path || "").localeCompare(String(b.path || "")));
+
+  const tree = { type: "dir", name: ".", path: "", children: [] };
+  const byPath = {};
+  for (let i = 0; i < files.length; i++) {
+    const rel = String(files[i].path || "").replaceAll("\\", "/");
+    _treeAddExportFile(tree, rel, i);
+    byPath[rel] = i;
+  }
+  _sortExportTree(tree, profile.sort_mode);
+
+  return {
+    schema_version: 1,
+    report_type: "project_report",
+    project: {
+      path: root,
+      generated_at: new Date().toISOString(),
+      generator: "Project Manager & SV Patch",
+      app_version: null,
+    },
+    export: {
+      mode: profile.scope === "selected" ? "selected" : "all",
+      profile,
+      selected_count: profile.scope === "selected" ? _exportSelectionState.selected.size : 0,
+      exported_files_count: files.length,
+      filters: {
+        ignored_exts: Array.from(DEFAULT_IGNORE_EXTS).sort((a, b) => String(a).localeCompare(String(b))),
+        ignored_paths: ignored,
+      },
+    },
+    tree,
+    files,
+    index: { by_path: byPath },
+    project_path: root,
+    generated_at: new Date().toISOString().replace("T", " ").slice(0, 19),
+    ignored,
+  };
+}
+
+function _renderTxtFromReport(report, projectPath) {
+  const lines = [];
+  lines.push("PROJECT REPORT");
+  lines.push("=".repeat(72));
+  lines.push(`Project: ${report.project?.path || projectPath || ""}`);
+  lines.push(`Generated: ${report.project?.generated_at || report.generated_at || ""}`);
+  lines.push(`Mode: ${report.export?.mode || "all"}`);
+  lines.push(`Exported files: ${Number(report.export?.exported_files_count || report.files?.length || 0)}`);
+  lines.push("");
+
+  if (report.export?.profile?.include_tree !== false) {
+    lines.push("EXPORTED TREE");
+    lines.push("-".repeat(72));
+    const walkTree = (node, depth) => {
+      if (!node) return;
+      if (depth > 0) {
+        const pad = "  ".repeat(Math.max(0, depth - 1));
+        lines.push(`${pad}${node.name}${node.type === "dir" ? "/" : ""}`);
+      }
+      if (Array.isArray(node.children)) {
+        for (const ch of node.children) walkTree(ch, depth + 1);
+      }
+    };
+    walkTree(report.tree, 0);
+    lines.push("");
+  }
+
+  if (report.export?.profile?.include_ignored_summary !== false && Array.isArray(report.ignored) && report.ignored.length) {
+    lines.push("Ignored:");
+    for (const ig of report.ignored) lines.push(`- ${ig}`);
+    lines.push("");
+  }
+
+  const files = Array.isArray(report.files) ? report.files : [];
+  for (const file of files) {
+    lines.push("-".repeat(72));
+    lines.push(`File: ${file.path}`);
+    lines.push(`Ext: ${file.ext} · Bytes: ${file.size_bytes ?? 0} · Lines: ${file.line_count ?? "-"} · Encoding: ${file.encoding || "-"}`);
+    lines.push("");
+    if (typeof file.content === "string") lines.push(file.content);
+    else lines.push(`[Could not read: ${file.content_error || "binary_or_decode_failed"}]`);
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function _formatArchiveSizeText(status, bytes, hasError) {
+  if (status === "loading") return "Loading…";
+  if (typeof bytes === "number" && Number.isFinite(bytes)) {
+    const kb = bytes / 1024;
+    const bytesFmt = new Intl.NumberFormat().format(bytes);
+    return `${bytesFmt} bytes (${kb.toFixed(1)} KB)${hasError ? " (error)" : ""}`;
+  }
+  return hasError ? "Loading… (error)" : "Loading…";
+}
+
+function _scheduleExportSizeRecalc(snapshot, profile, resolvedAbs) {
+  if (!snapshot?.projectPath) return;
+  const key = _buildExportSizeKey(snapshot, profile, resolvedAbs);
+  _exportSizeState.key = key;
+
+  if (_exportSizeState.cache.has(key)) {
+    const bytes = _exportSizeState.cache.get(key);
+    _exportSizeState.status = "ready";
+    _exportSizeState.bytes = bytes;
+    _exportSizeState.lastStableBytes = bytes;
+    return;
+  }
+
+  if (_exportSizeState.debounceTimer) {
+    clearTimeout(_exportSizeState.debounceTimer);
+    _exportSizeState.debounceTimer = null;
+  }
+
+  const token = ++_exportSizeState.token;
+  _exportSizeState.status = "loading";
+
+  _exportSizeState.debounceTimer = setTimeout(async () => {
+    try {
+      const report = await _buildUnifiedReportForSize(snapshot, profile, resolvedAbs);
+      if (token !== _exportSizeState.token) return;
+      const rendered = profile.format === "json"
+        ? JSON.stringify(report, null, 2)
+        : _renderTxtFromReport(report, snapshot.projectPath);
+      const bytes = Buffer.byteLength(rendered, "utf8");
+      if (token !== _exportSizeState.token) return;
+      _exportSizeState.cache.set(key, bytes);
+      _exportSizeState.status = "ready";
+      _exportSizeState.bytes = bytes;
+      _exportSizeState.lastStableBytes = bytes;
+      _updateExportLiveSummary(snapshot);
+    } catch {
+      if (token !== _exportSizeState.token) return;
+      _exportSizeState.status = "error";
+      _exportSizeState.bytes = _exportSizeState.lastStableBytes;
+      _updateExportLiveSummary(snapshot);
+    }
+  }, 180);
+}
+
+function _buildExportProfile() {
+  return {
+    profile_id: "default",
+    format: _exportUi.type === "json" ? "json" : "txt",
+    scope: _exportSelectionState.selectedMode === "selected" ? "selected" : "all",
+    content_level: _exportUi.contentLevel === "compact" ? "compact" : "full",
+    include_tree: Boolean(_exportUi.options.treeHeader),
+    include_hashes: Boolean(_exportUi.options.hashes),
+    include_ignored_summary: Boolean(_exportUi.options.ignoredSummary),
+    sort_mode: _exportUi.options.sortDet === false ? "alpha" : "dir_first_alpha",
+    schema_version: 1,
+  };
+}
+
+function _updateExportSelectionMeta(snapshot) {
+  const countEl = el("exportSelectedCount");
+  const selectedCount = _exportSelectionState.selected.size;
+  const resolved = _collectExportableFromSelection(snapshot || lastSnapshot || {}).size;
+  if (countEl) countEl.textContent = `Selected: ${selectedCount} · Resolved files: ${resolved}`;
+  const countElTab = el("exportSelectedCountTab");
+  if (countElTab) countElTab.textContent = `Selected: ${selectedCount} · Resolved files: ${resolved}`;
+  _updateExportLiveSummary(snapshot);
+}
+
+function _writeExportSelectionConfig(snapshot) {
+  try {
+    const root = String(snapshot?.projectPath || "");
+    if (!root) return;
+    const cfgPath = path.join(root, _exportSelectionFile);
+    const payload = {
+      selectedOnly: _exportSelectionState.selectedMode === "selected",
+      selectedMode: _exportSelectionState.selectedMode,
+      profile: _buildExportProfile(),
+      selected: Array.from(_exportSelectionState.selected).map((p) => _normalizeAbsPath(p)),
+      updatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(cfgPath, JSON.stringify(payload, null, 2), "utf-8");
+  } catch {}
+}
+
+function _loadExportUiConfig() {
+  try {
+    const raw = localStorage.getItem("pm_sv_export_ui_v1");
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    if (obj?.type === "txt" || obj?.type === "json") _exportUi.type = obj.type;
+    if (["compact", "standard", "full"].includes(obj?.contentLevel)) _exportUi.contentLevel = obj.contentLevel;
+    if (obj && typeof obj.options === "object") {
+      _exportUi.options.treeHeader = Boolean(obj.options.treeHeader ?? _exportUi.options.treeHeader);
+      _exportUi.options.ignoredSummary = Boolean(obj.options.ignoredSummary ?? _exportUi.options.ignoredSummary);
+      _exportUi.options.hashes = Boolean(obj.options.hashes ?? _exportUi.options.hashes);
+      _exportUi.options.sortDet = Boolean(obj.options.sortDet ?? _exportUi.options.sortDet);
+    }
+  } catch {}
+}
+
+function _saveExportUiConfig() {
+  try {
+    localStorage.setItem("pm_sv_export_ui_v1", JSON.stringify(_exportUi));
+  } catch {}
+}
+
+function _setPresetFeedback(message, mode = "none") {
+  const fb = el("presetFeedback");
+  if (!fb) return;
+  fb.textContent = message || "Preset: idle";
+  fb.classList.remove("ok", "partial", "broken", "loading", "error", "cancel");
+  if (mode && mode !== "none") fb.classList.add(mode);
+}
+function _defaultPresetName() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `preset-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.pmspreset.json`;
+}
+
+function _setPresetFeedbackTimed(message, mode = "none", ttl = 4800) {
+  _setPresetFeedback(message, mode);
+  try { if (_exportPresetState.feedbackTimer) clearTimeout(_exportPresetState.feedbackTimer); } catch {}
+  if (mode === "loading") return;
+  _exportPresetState.feedbackTimer = setTimeout(() => {
+    if (_exportPresetState.lastPresetPath) {
+      _setPresetFeedback(`Preset file: ${path.basename(_exportPresetState.lastPresetPath)}`, "none");
+    } else {
+      _setPresetFeedback("Preset: idle", "none");
+    }
+  }, Math.max(1200, Number(ttl || 0)));
+}
+
+function _setPresetActionButtonsBusy(busy) {
+  const bSave = el("btnPresetSaveFile");
+  const bImport = el("btnPresetImportFile");
+  if (bSave) bSave.disabled = !!busy;
+  if (bImport) bImport.disabled = !!busy;
+}
+
+// Backward compatibility shim for legacy preset UI calls.
+function _refreshPresetControlsUi() {
+  _setPresetActionButtonsBusy(Boolean(_exportPresetState.applying));
+  if (_exportPresetState.lastPresetPath) {
+    _setPresetFeedback(`Preset file: ${path.basename(_exportPresetState.lastPresetPath)}`, "none");
+  } else {
+    _setPresetFeedback("Preset: idle", "none");
+  }
+}
+
+function _markPresetRefreshCycle() {
+  try {
+    _exportPresetState.applyToken = Number(_exportPresetState.applyToken || 0) + 1;
+  } catch {}
+}
+
+function _maybeAutoApplyPreset(_snapshot) {
+  // File-based preset workflow is explicit/manual-only.
+  // Keep as compatibility no-op so legacy call sites cannot throw.
+  return false;
+}
+
+function _buildPresetV1(snapshot) {
+  const selected = _normalizePathList(Array.from(_exportSelectionState.selected || []));
+  const hidden = _normalizePathList(snapshot?.ignored || []);
+  return {
+    schema_version: "preset.v1",
+    created_at: new Date().toISOString(),
+    project_root: String(snapshot?.projectPath || ""),
+    export: {
+      profile: _sanitizeExportProfileForPreset(_buildExportProfile()),
+      scope: {
+        mode: _exportSelectionState.selectedMode === "selected" ? "selected" : "all",
+        selected,
+      },
+      hidden_paths: hidden,
+    },
+    tree: {
+      expanded_paths: _normalizePathList(Array.from(expandedPaths || [])),
+    },
+  };
+}
+
+
+function _sanitizeExportProfileForPreset(profile) {
+  const p = { ...(profile || {}) };
+  if (Object.prototype.hasOwnProperty.call(p, "schema_version")) {
+    p.export_schema_version = p.schema_version;
+    delete p.schema_version;
+  }
+  return p;
+}
 
 function _normalizePathList(list, projectRoot = "") {
   if (!Array.isArray(list)) return [];
@@ -2611,11 +3525,7 @@ async function _runExportByType(type) {
 function _buildFileRow(r, snapshot) {
   const row = document.createElement("div");
   const picked = _isSelectedPath(r.absPath);
-  const rowPath = _normalizeAbsPath(r.absPath);
-  const isSelectedRow = r.id === selectedId || (selectedAbsPath && rowPath === selectedAbsPath);
-  row.className = "row" + (isSelectedRow ? " selected" : "") + (r.ignored ? " ignored" : "") + (picked ? " row-picked" : "");
-  row.dataset.absPath = rowPath;
-  row.tabIndex = 0;
+  row.className = "row" + (r.id === selectedId ? " selected" : "") + (r.ignored ? " ignored" : "") + (picked ? " row-picked" : "");
 
   const indentPx = r.depth * 16;
 
@@ -2658,6 +3568,21 @@ function _buildFileRow(r, snapshot) {
       return;
     selectedId = r.id;
     selectedAbsPath = rowPath;
+    render(snapshot);
+  });
+
+  row.querySelector("[data-select]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (r.ignored) return;
+    const p = _normalizeAbsPath(r.absPath);
+    if (r.isDir) {
+      const descendants = _collectDescendantsFromSnapshot(snapshot, p);
+      const isSelecting = !_exportSelectionState.selected.has(p);
+      _applyFolderSelection(_exportSelectionState.selected, p, isSelecting, descendants);
+    } else {
+      _toggleSelectedPath(p);
+    }
+    _updateExportSelectionMeta(snapshot);
     render(snapshot);
   });
 
@@ -2933,16 +3858,14 @@ try{
     _cleanupExpandedPathsFromTree(snapshot.tree);
     syncExpandedIdsFromPaths(snapshot.tree);
 
-    const rows = [];
-    const searchMode = _fileSearchMode(filesSearchQuery);
-    if (searchMode) {
-      for (const ch of snapshot.tree.children || []) {
-        flattenTreeFiltered(ch, 0, rows, ignoredSet, searchMode);
-      }
-    } else {
-      for (const ch of snapshot.tree.children || []) {
-        flattenTree(ch, 0, rows, ignoredSet);
-      }
+  _cleanupExpandedPathsFromTree(snapshot.tree);
+  syncExpandedIdsFromPaths(snapshot.tree);
+
+  const rows = [];
+  const searchMode = _fileSearchMode(filesSearchQuery);
+  if (searchMode) {
+    for (const ch of snapshot.tree.children || []) {
+      flattenTreeFiltered(ch, 0, rows, ignoredSet, searchMode);
     }
 
     _updateItemsCount(snapshot, rows.length);
@@ -3050,16 +3973,18 @@ function _updateFilesBreadcrumb(snapshot, preferredAbsPath = "") {
   elBc.title = b.title;
 }
 
-function _setupKeyboardFocusModality() {
-  const onKey = (ev) => {
-    if (["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(ev.key)) {
-      document.body.classList.add("kbNav");
+  _fileRowsCache = rows;
+  _fileRowsSnapshot = snapshot;
+  _renderVirtualFileRows(list, rows, snapshot);
+  _updateExportSelectionMeta(snapshot);
+
+  if (!_exportPresetState.applying) {
+    if (_exportPresetState.lastPresetPath) {
+      _setPresetFeedback(`Preset file: ${path.basename(_exportPresetState.lastPresetPath)}`, "none");
+    } else {
+      _setPresetFeedback("Preset: idle", "none");
     }
-  };
-  const onPointer = () => document.body.classList.remove("kbNav");
-  window.addEventListener("keydown", onKey, true);
-  window.addEventListener("pointerdown", onPointer, true);
-  window.addEventListener("mousedown", onPointer, true);
+  }
 }
 
 function _previewActionLabel(action) {
@@ -3766,11 +4691,6 @@ async function _confirmApplyFromDiffModal() {
 }
 
 function bind() {
-  if (window.__uiBindRan) {
-    console.warn("[UI] bind already executed, skipping duplicate");
-    return;
-  }
-  window.__uiBindRan = true;
   _loadExportUiConfig();
   try{
     const prof = _buildExportProfile();
@@ -3933,8 +4853,6 @@ function bind() {
   _bindClickSafe("btnPresetImportFile", async () => {
     await _importPresetFromFile(lastSnapshot);
   });
-
-  _bindPresetMenuUi();
 
 
   _bindClickSafe("btnExportTxt", async () => {
@@ -4110,7 +5028,6 @@ function bind() {
 
   _refreshPresetControlsUi();
   _reportUiBindHealth();
-  _runUiGlobalHitTestReport();
 
 }
 
@@ -4143,7 +5060,23 @@ ipcRenderer.on("watcher:changed", (_ev, payload) => {
 
 
 if (__PM_UI_DEV__) {
-  _uiDevLog("fatal hooks active");
+  window.addEventListener("error", (ev) => {
+    const msg = String(ev?.message || "unknown");
+    if (msg.includes("is not defined")) {
+      console.error("[UI FATAL] Undefined reference:", msg);
+      try { _setPresetFeedbackTimed(`Error: ${msg}`, "error", 4200); } catch {}
+    }
+    _uiDevLog(`window error: ${ev?.message || "unknown"}`, ev?.error || null);
+  });
+  window.addEventListener("unhandledrejection", (ev) => {
+    const reason = ev?.reason;
+    const msg = String(reason?.message || reason || "");
+    if (msg.includes("is not defined")) {
+      console.error("[UI FATAL] Undefined reference:", msg);
+      try { _setPresetFeedbackTimed(`Error: ${msg}`, "error", 4200); } catch {}
+    }
+    _uiDevLog("unhandled rejection", ev?.reason || null);
+  });
 }
 
 
